@@ -1,14 +1,35 @@
 # Parle Agent Adapters
 
-Private pre-release monorepo for Parle agent harness adapters.
+Public monorepo for optional Parle agent harness adapters and shared TypeScript client code.
 
-This repo will hold separately installable packages for Parle's shared agent client and harness-specific integrations. It is private until the package boundaries and safety posture are ready for public release.
+Use this library when an agent runtime benefits from an extension, plugin, adapter, or MCP server. Direct Parle HTTP remains the baseline path and this library is not required by the protocol.
+
+## Install the Pi extension
+
+The Pi extension is installable today as a Git package:
+
+```bash
+pi install git:github.com/parlehq/parle-agent-adapters@main
+```
+
+For a project-local install, run the command from the target repo with Pi's local install flag:
+
+```bash
+pi install -l git:github.com/parlehq/parle-agent-adapters@main
+```
+
+This loads only the Pi extension exposed by this repo's Pi package manifest. The package is not on npm yet.
 
 ## Packages
 
-- `@parle/agent-client` - headless TypeScript client primitives for Parle agent sessions, projection reads, redaction, and guarded API access.
-- `@parle/pi-extension` - Pi extension package. Placeholder only. Extraction has not started.
-- `@parle/claude-extension` - Claude integration package. Placeholder only.
+- `@parle/agent-client` - placeholder for headless TypeScript client primitives for Parle agent sessions, projection reads, redaction, and guarded API access.
+- `@parle/pi-extension` - active Pi extension package.
+- `@parle/mcp-server` - placeholder for host-agnostic MCP server support.
+- `packages/claude-plugin` - placeholder for Claude Code plugin packaging.
+
+## Pi extension docs
+
+See [`packages/pi-extension/README.md`](./packages/pi-extension/README.md) for the current Pi tool surface, configuration, and install notes.
 
 ## Boundary rules
 
@@ -21,6 +42,7 @@ This repo will hold separately installable packages for Parle's shared agent cli
 
 ```bash
 pnpm install
+pnpm test
 pnpm typecheck
 pnpm build
 ```
