@@ -9,6 +9,18 @@
     "test": "pnpm -r test"
   },
   "devDependencies": {
+    "@types/node": "^26.1.0",
+    "jiti": "^2.7.0",
+    "typebox": "^1.0.0",
     "typescript": "^6.0.3"
+  },
+  "pi": {
+    "extensions": [
+      "./packages/pi-extension/src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
   }
 }

@@ -4,18 +4,21 @@
   "private": true,
   "type": "module",
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
-  "dependencies": {
-    "@parle/agent-client": "workspace:*"
-  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "echo 'No tests yet'"
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "jiti": "^2.7.0",
+    "typebox": "^1.0.0"
   }
 }

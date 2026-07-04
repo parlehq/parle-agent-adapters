@@ -7,12 +7,25 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@earendil-works/pi-coding-agent':
+        specifier: '*'
+        version: 0.80.3(ws@8.21.0)(zod@4.4.3)
     devDependencies:
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.1.0
+      jiti:
+        specifier: ^2.7.0
+        version: 2.7.0
+      typebox:
+        specifier: ^1.0.0
+        version: 1.3.3
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
 
-  packages/claude-extension:
+  packages/claude-plugin:
     dependencies:
       '@parle/agent-client':
         specifier: workspace:*
@@ -20,16 +33,23 @@ importers:
 
   packages/client: {}
 
+  packages/mcp-server:
+    dependencies:
+      '@parle/agent-client':
+        specifier: workspace:*
+        version: link:../client
+
   packages/pi-extension:
     dependencies:
       '@earendil-works/pi-coding-agent':
         specifier: '*'
         version: 0.80.3(ws@8.21.0)(zod@4.4.3)
-      '@parle/agent-client':
-        specifier: workspace:*
-        version: link:../client
+    devDependencies:
+      jiti:
+        specifier: ^2.7.0
+        version: 2.7.0
       typebox:
-        specifier: '*'
+        specifier: ^1.0.0
         version: 1.3.3
 
 packages:

@@ -1,5 +1,5 @@
 {
-  "name": "@parle/claude-extension",
+  "name": "@parle/claude-plugin",
   "version": "0.0.0",
   "private": true,
   "type": "module",
