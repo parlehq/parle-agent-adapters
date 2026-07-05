@@ -245,6 +245,40 @@ test("room tool calls rebootstrap after session 404", async () => {
   assert.equal(inboxCalls, 2);
 });
 
+test("mid-run unpinned rebootstrap baselines the new session before retry", async () => {
+  let sessionCreates = 0;
+  let inboxCalls = 0;
+  let baselineCalls = 0;
+  const harness = installSendHarness(async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v/agent/sessions")) {
+      sessionCreates += 1;
+      return new Response(JSON.stringify({ agent_session_id: `as-baseline-${sessionCreates}`, session_handle: `baseline-session-${sessionCreates}`, expires_at: "2026-07-04T00:00:00Z", address: `@p.a.baseline-session-${sessionCreates}` }), { status: 201 });
+    }
+    if (u.endsWith("/participants")) return new Response(JSON.stringify({ participant_id: "p-baseline" }), { status: 201 });
+    if (u.includes("/projection")) return new Response(JSON.stringify({ watermark: 0, messages: [] }), { status: 200 });
+    if (u.includes("/responsive-delivery")) {
+      baselineCalls += 1;
+      return new Response(JSON.stringify({ watermark: 0, delivery: { last_acked_seq: 0 }, messages: [] }), { status: 200 });
+    }
+    if (u.includes("/inbound")) {
+      inboxCalls += 1;
+      if (inboxCalls === 1) return new Response(JSON.stringify({ error: { message: "not found" } }), { status: 404 });
+      return new Response(JSON.stringify({ watermark: 0, messages: [] }), { status: 200 });
+    }
+    throw new Error("unexpected " + u);
+  });
+
+  await harness.call("parle_status");
+  __testing.patchRuntime({ baselineAt: "2026-07-05T20:00:00.000Z" });
+  const result = await harness.call("parle_inbox");
+
+  assert.equal(result.details.surface, "inbound");
+  assert.equal(sessionCreates, 2);
+  assert.equal(inboxCalls, 2);
+  assert.equal(baselineCalls, 1);
+});
+
 test("parle_send treats direct addressing failures as non-retryable with hint", async () => {
   const harness = installSendHarness(async (url) => {
     const u = String(url);
