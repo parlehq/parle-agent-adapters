@@ -9,6 +9,7 @@ const req = createRequire(import.meta.url);
 const jitiFactory = req("jiti");
 const jiti = jitiFactory(import.meta.url, { interopDefault: true });
 const mod = jiti("../src/index.ts");
+const { __testing } = mod;
 
 function installHarness(cwd) {
   const tools = {};
@@ -95,7 +96,7 @@ test("parle_send includes direct addressing when to is present", async () => {
     if (u.includes("/projection")) return new Response(JSON.stringify({ watermark: 0, messages: [] }), { status: 200 });
     if (u.endsWith("/v/rooms/room-send/messages")) {
       messageRequest = JSON.parse(init.body);
-      return new Response(JSON.stringify({ seq: 1, event_id: "event-1", moderation: { held: false } }), { status: 201 });
+      return new Response(JSON.stringify({ seq: 1, event_id: "event-1", moderation: { held: true, delivered: false, scan: "skipped", steps: [], verdict: "pending", reason: "awaiting moderation completion" } }), { status: 201 });
     }
     throw new Error("unexpected " + u);
   });
@@ -106,6 +107,8 @@ test("parle_send includes direct addressing when to is present", async () => {
   assert.equal(messageRequest.payload.body, "What time is it?");
   assert.equal(result.details.addressedTo, "@gilman.galexc.mme3hxrdumknrpvv");
   assert.equal(result.details.warning, undefined);
+  assert.equal(result.details.deliveryStatus.state, "accepted_scan_skipped");
+  assert.match(result.details.deliveryStatus.message, /do not describe it as awaiting moderation/);
   assert.match(result.details.retry, /identical to\/addressing/);
 });
 
@@ -124,6 +127,21 @@ test("parle_send without to stays unaddressed and warns on leading body mention"
 
   assert.equal(Object.hasOwn(messageRequest, "addressing"), false);
   assert.match(result.details.warning, /will not wake a peer watcher/);
+});
+
+test("responsive delivery prompt tells agents how to reply directly", () => {
+  const prompt = __testing.inboundPrompt({
+    seq: 9,
+    event_id: "event-9",
+    participant_id: "participant-9",
+    provenance: { author: "participant-9", kind: "participant" },
+    author: { address: "@gilman.galexc.sender123" },
+    content: "hello",
+  });
+
+  assert.match(prompt, /reply_to_author: @gilman\.galexc\.sender123/);
+  assert.match(prompt, /call parle_send with to set exactly to @gilman\.galexc\.sender123/);
+  assert.match(prompt, /Do not address replies to participant_id or provenance_author/);
 });
 
 test("parle_send treats direct addressing failures as non-retryable with hint", async () => {
