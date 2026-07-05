@@ -12,6 +12,7 @@ const mod = jiti("../src/index.ts");
 const { __testing } = mod;
 
 function installHarness(cwd) {
+  __testing.resetRuntime();
   const tools = {};
   const commands = {};
   const pi = {
@@ -24,6 +25,8 @@ function installHarness(cwd) {
   return {
     tools,
     commands,
+    ctx,
+    cwd,
     call(name, params = {}) {
       return tools[name].execute("tc", params, undefined, undefined, ctx);
     },
@@ -142,6 +145,104 @@ test("responsive delivery prompt tells agents how to reply directly", () => {
   assert.match(prompt, /reply_to_author: @gilman\.galexc\.sender123/);
   assert.match(prompt, /call parle_send with to set exactly to @gilman\.galexc\.sender123/);
   assert.match(prompt, /Do not address replies to participant_id or provenance_author/);
+});
+
+test("parle_inbox reads the inbound attention surface", async () => {
+  let inboxURL;
+  const harness = installSendHarness(async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v/agent/sessions")) return new Response(JSON.stringify({ agent_session_id: "as-inbox", session_handle: "inbox-session", expires_at: "2026-07-04T00:00:00Z", address: "@p.a.inbox-session" }), { status: 201 });
+    if (u.endsWith("/participants")) return new Response(JSON.stringify({ participant_id: "p-inbox" }), { status: 201 });
+    if (u.includes("/projection")) return new Response(JSON.stringify({ watermark: 3, messages: [] }), { status: 200 });
+    if (u.includes("/inbound")) {
+      inboxURL = u;
+      return new Response(JSON.stringify({ watermark: 4, messages: [{ seq: 4, event_id: "event-4", payload: { body: "hello" } }] }), { status: 200 });
+    }
+    throw new Error("unexpected " + u);
+  });
+
+  const result = await harness.call("parle_inbox", { waitSeconds: 2 });
+
+  assert.match(inboxURL, /\/v\/rooms\/room-send\/inbound\?since_seq=3&wait=2/);
+  assert.equal(result.details.surface, "inbound");
+  assert.equal(result.details.cursor, 4);
+  assert.match(result.details.note, /excludes your own rows/);
+});
+
+test("parle_affordances wraps the room affordances endpoint", async () => {
+  let sawAffordances = false;
+  const harness = installSendHarness(async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v/agent/sessions")) return new Response(JSON.stringify({ agent_session_id: "as-aff", session_handle: "aff-session", expires_at: "2026-07-04T00:00:00Z", address: "@p.a.aff-session" }), { status: 201 });
+    if (u.endsWith("/participants")) return new Response(JSON.stringify({ participant_id: "p-aff" }), { status: 201 });
+    if (u.includes("/projection")) return new Response(JSON.stringify({ watermark: 0, messages: [] }), { status: 200 });
+    if (u.endsWith("/v/rooms/room-send/affordances")) {
+      sawAffordances = true;
+      return new Response(JSON.stringify({ affordances: [{ action: "post_message", allowed: true }] }), { status: 200 });
+    }
+    throw new Error("unexpected " + u);
+  });
+
+  const result = await harness.call("parle_affordances");
+
+  assert.equal(sawAffordances, true);
+  assert.equal(result.details.affordances[0].action, "post_message");
+  assert.match(result.details.note, /advisory/);
+});
+
+test("heartbeat 404 reboots the session before the watcher can wedge", async () => {
+  let sessionCreates = 0;
+  let heartbeatCalls = 0;
+  const harness = installSendHarness(async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v/agent/sessions")) {
+      sessionCreates += 1;
+      return new Response(JSON.stringify({ agent_session_id: `as-heart-${sessionCreates}`, session_handle: `heart-session-${sessionCreates}`, expires_at: "2026-07-04T00:00:00Z", address: `@p.a.heart-session-${sessionCreates}` }), { status: 201 });
+    }
+    if (u.endsWith("/participants")) return new Response(JSON.stringify({ participant_id: "p-heart" }), { status: 201 });
+    if (u.includes("/projection")) return new Response(JSON.stringify({ watermark: 0, messages: [] }), { status: 200 });
+    if (u.includes("/heartbeat")) {
+      heartbeatCalls += 1;
+      if (heartbeatCalls === 1) return new Response(JSON.stringify({ error: { message: "not found" } }), { status: 404 });
+      return new Response(null, { status: 204 });
+    }
+    throw new Error("unexpected " + u);
+  });
+
+  await harness.call("parle_status");
+  const cfg = __testing.resolveConfig(harness.cwd);
+  await __testing.maybeHeartbeatAgentSession(harness.ctx, cfg);
+
+  assert.equal(sessionCreates, 2);
+  assert.equal(heartbeatCalls, 2);
+  assert.equal(__testing.runtimeState().agentSessionId, "as-heart-2");
+  assert.equal(typeof __testing.runtimeState().lastHeartbeatAt, "string");
+});
+
+test("room tool calls rebootstrap after session 404", async () => {
+  let sessionCreates = 0;
+  let inboxCalls = 0;
+  const harness = installSendHarness(async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v/agent/sessions")) {
+      sessionCreates += 1;
+      return new Response(JSON.stringify({ agent_session_id: `as-${sessionCreates}`, session_handle: `session-${sessionCreates}`, expires_at: "2026-07-04T00:00:00Z", address: `@p.a.session-${sessionCreates}` }), { status: 201 });
+    }
+    if (u.endsWith("/participants")) return new Response(JSON.stringify({ participant_id: "p-reboot" }), { status: 201 });
+    if (u.includes("/projection")) return new Response(JSON.stringify({ watermark: 0, messages: [] }), { status: 200 });
+    if (u.includes("/inbound")) {
+      inboxCalls += 1;
+      if (inboxCalls === 1) return new Response(JSON.stringify({ error: { message: "not found" } }), { status: 404 });
+      return new Response(JSON.stringify({ watermark: 0, messages: [] }), { status: 200 });
+    }
+    throw new Error("unexpected " + u);
+  });
+
+  const result = await harness.call("parle_inbox");
+
+  assert.equal(result.details.surface, "inbound");
+  assert.equal(sessionCreates, 2);
+  assert.equal(inboxCalls, 2);
 });
 
 test("parle_send treats direct addressing failures as non-retryable with hint", async () => {

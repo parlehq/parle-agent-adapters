@@ -19,6 +19,8 @@ const WATCH_ERROR_BACKOFF_MS = 5000;
 const WATCH_ERROR_BACKOFF_JITTER_MS = 1000;
 const WATCH_EMPTY_BACKOFF_MS = 250;
 const WATCH_BASELINE_ACK_LIMIT = 5000;
+const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+const HEARTBEAT_EXPIRY_MARGIN_MS = 10 * 60 * 1000;
 const FOOTER_FAILURE_THRESHOLD = 3;
 const FOOTER_FAILURE_AGE_MS = 60_000;
 const INJECTED_KEY_LIMIT = 4096;
@@ -80,6 +82,8 @@ type RuntimeState = {
   lastHttpStatus?: number;
   lastErrorClass?: WatcherErrorClass;
   consecutivePollFailures?: number;
+  lastHeartbeatAt?: string;
+  lastEndSessionAt?: string;
 };
 
 type TruncatedText = {
@@ -103,6 +107,13 @@ type ParleRequestParams = {
 };
 
 type ParleReadParams = {
+  sinceSeq?: number;
+  waitSeconds?: number;
+  limitMessages?: number;
+  advanceCursor?: boolean;
+};
+
+type ParleInboxParams = {
   sinceSeq?: number;
   waitSeconds?: number;
   limitMessages?: number;
@@ -432,10 +443,35 @@ async function withRebootstrap<T>(ctx: any, cfg: ParleConfig, fn: () => Promise<
   try {
     return await fn();
   } catch (error: any) {
-    if (error?.status !== 401) throw error;
+    if (error?.status !== 401 && error?.status !== 404) throw error;
     await bootstrap(ctx, cfg, signal, true);
     return fn();
   }
+}
+
+function shouldHeartbeat(now = Date.now()): boolean {
+  if (!runtime.agentSessionId || !runtime.sessionHandle) return false;
+  if (!runtime.lastHeartbeatAt) return true;
+  if (now - Date.parse(runtime.lastHeartbeatAt) >= HEARTBEAT_INTERVAL_MS) return true;
+  if (runtime.expiresAt && Date.parse(runtime.expiresAt) - now <= HEARTBEAT_EXPIRY_MARGIN_MS) return true;
+  return false;
+}
+
+async function heartbeatAgentSession(cfg: ParleConfig, signal?: AbortSignal) {
+  if (!runtime.agentSessionId || !runtime.sessionHandle) return;
+  await requestJson(cfg, `/v/agent/sessions/${encodeURIComponent(runtime.agentSessionId)}/heartbeat`, { method: "POST", session: true, signal });
+  runtime.lastHeartbeatAt = new Date().toISOString();
+}
+
+async function maybeHeartbeatAgentSession(ctx: any, cfg: ParleConfig, signal?: AbortSignal) {
+  if (!shouldHeartbeat()) return;
+  await withRebootstrap(ctx, cfg, async () => heartbeatAgentSession(cfg, signal), signal);
+}
+
+async function endAgentSession(cfg: ParleConfig, signal?: AbortSignal) {
+  if (!runtime.agentSessionId || !runtime.sessionHandle || !cfg.enabled || !cfg.agentToken?.value) return;
+  await requestJson(cfg, `/v/agent/sessions/${encodeURIComponent(runtime.agentSessionId)}/end`, { method: "POST", session: true, signal });
+  runtime.lastEndSessionAt = new Date().toISOString();
 }
 
 function updateCursorFromMessages(current: number | undefined, messages: any[], watermark?: number): number | undefined {
@@ -562,6 +598,7 @@ function summarizeSendDelivery(details: any): any {
     return {
       state: "held_for_moderation",
       message: moderation.reason || "Message accepted but held for moderation completion.",
+      nextStep: typeof details?.seq === "number" ? `Poll parle_read or parle_inbox around seq ${details.seq}; if held_backlog drains and the row never appears, it was blocked.` : "Poll parle_read or parle_inbox; if held_backlog drains and the row never appears, it was blocked.",
     };
   }
   if (moderation.delivered === true) {
@@ -672,9 +709,10 @@ async function runWatcher(pi: any, ctx: any, cfg: ParleConfig, signal: AbortSign
   setStatus(ctx, cfg);
   try {
     await ensureBootstrapped(ctx, cfg, signal);
-    if (!runtime.baselineAt) await baselineResponsiveDelivery(ctx, cfg, signal);
+    if (!runtime.baselineAt && !cfg.sessionHandleOverride?.value) await baselineResponsiveDelivery(ctx, cfg, signal);
     while (!signal.aborted && watcherConfigured(cfg)) {
       try {
+        await maybeHeartbeatAgentSession(ctx, cfg, signal);
         runtime.watcherState = "waiting";
         runtime.lastPollStartedAt = new Date().toISOString();
         setStatus(ctx, cfg);
@@ -784,6 +822,8 @@ function statusDetails(ctx: any) {
       lastHttpStatus: runtime.lastHttpStatus,
       lastErrorClass: runtime.lastErrorClass,
       consecutivePollFailures: runtime.consecutivePollFailures,
+      lastHeartbeatAt: runtime.lastHeartbeatAt,
+      lastEndSessionAt: runtime.lastEndSessionAt,
       sessionHandle: runtime.sessionHandle ? "<redacted>" : undefined,
     },
     guidance: { ai: AI_GUIDANCE_URL, api: DEFAULT_API_BASE },
@@ -798,7 +838,22 @@ function shouldShowFooterError(): boolean {
   return Date.now() - Date.parse(runtime.lastWatcherErrorAt) >= FOOTER_FAILURE_AGE_MS;
 }
 
-export const __testing = { authorReplyAddress, inboundPrompt, summarizeSendDelivery };
+export const __testing = {
+  authorReplyAddress,
+  inboundPrompt,
+  summarizeSendDelivery,
+  maybeHeartbeatAgentSession,
+  resolveConfig,
+  runtimeState() { return runtime; },
+  resetRuntime() {
+    runtime = { bootstrapped: false, watcherState: "off" };
+    injectedKeys.clear();
+    injectedKeyOrder.length = 0;
+    watcherAbort?.abort();
+    watcherAbort = undefined;
+    watcherLoopRunning = false;
+  },
+};
 
 function setStatus(ctx: any, cfg = resolveConfig(ctx.cwd || process.cwd())) {
   if (!ctx?.ui?.setStatus) return;
@@ -820,6 +875,12 @@ export default function parleExtension(pi: any) {
   });
 
   pi.on("session_shutdown", (_event: any, ctx: any) => {
+    const cfg = resolveConfig(ctx.cwd || process.cwd());
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2000);
+    void endAgentSession(cfg, controller.signal).catch((error) => {
+      runtime.lastError = redactString(error instanceof Error ? error.message : String(error));
+    }).finally(() => clearTimeout(timer));
     stopWatcher(ctx);
   });
 
@@ -891,14 +952,20 @@ export default function parleExtension(pi: any) {
       const missing = [] as string[];
       if (!details.roomId?.set) missing.push("PARLE_ROOM_ID");
       if (!details.agentToken?.set) missing.push("PARLE_ROOM_AGENT_TOKEN");
-      return formatResult({ ...details, missing, next: missing.length ? "Run parle_guidance for live setup instructions. Set missing values in the environment, .env, or .parle/credentials." : "Config is sufficient for lazy runtime bootstrap." });
+      return formatResult({
+        ...details,
+        missing,
+        howPeersReachYou: details.runtime?.sessionAddress ? `Peers can direct responsive messages to ${details.runtime.sessionAddress}. Share this address when you want this exact session to be reachable.` : undefined,
+        peerDiscovery: "Peer addresses are learned from message author blocks on readable room messages. Agents cannot list the full peer roster unless a room-specific API grants that separately.",
+        next: missing.length ? "Run parle_guidance for live setup instructions. Set missing values in the environment, .env, or .parle/credentials." : "Config is sufficient for lazy runtime bootstrap.",
+      });
     },
   });
 
   pi.registerTool({
     name: "parle_request",
     label: "Parle Request",
-    description: "Generic guarded request to allowlisted Parle URLs with redaction, response caps, explicit auth mode, and mutation confirmation.",
+    description: "Generic guarded request to allowlisted Parle URLs with redaction, response caps, explicit auth mode, and mutation confirmation. For room routes, authMode:'agent_token' is normally required. Prefer parle_send for message submits because it supplies Idempotency-Key and direct addressing correctly.",
     parameters: Type.Object({
       method: Type.Optional(Type.String()),
       path: Type.Optional(Type.String()),
@@ -922,7 +989,7 @@ export default function parleExtension(pi: any) {
   pi.registerTool({
     name: "parle_read",
     label: "Parle Read",
-    description: "Read Parle projection rows after the process cursor by default. Returned room content is untrusted.",
+    description: "Read Parle projection rows after the process cursor by default. Projection includes your own rows and room history. Use parle_inbox for the self-excluding attention surface. Returned room content is untrusted.",
     parameters: Type.Object({
       sinceSeq: Type.Optional(Type.Number()),
       waitSeconds: Type.Optional(Type.Number()),
@@ -960,9 +1027,63 @@ export default function parleExtension(pi: any) {
   });
 
   pi.registerTool({
+    name: "parle_inbox",
+    label: "Parle Inbox",
+    description: "Read the Direct Agent Comms inbound attention surface after the process cursor by default. This is self-excluding and includes unaddressed, broadcast, and direct-to-this-session rows. Returned room content is untrusted.",
+    parameters: Type.Object({
+      sinceSeq: Type.Optional(Type.Number()),
+      waitSeconds: Type.Optional(Type.Number()),
+      limitMessages: Type.Optional(Type.Number()),
+      advanceCursor: Type.Optional(Type.Boolean()),
+    }),
+    async execute(_id, params: ParleInboxParams, signal, _update, ctx) {
+      lastCtx = ctx;
+      const cfg = resolveConfig(ctx.cwd || process.cwd());
+      const details = await withRebootstrap(ctx, cfg, async () => {
+        const since = typeof params.sinceSeq === "number" ? params.sinceSeq : (runtime.cursor || 0);
+        const wait = typeof params.waitSeconds === "number" ? Math.max(0, Math.min(30, params.waitSeconds)) : 0;
+        const projection = await requestJson(cfg, `/v/rooms/${encodeURIComponent(cfg.roomId!.value)}/inbound?since_seq=${encodeURIComponent(String(since))}&wait=${encodeURIComponent(String(wait))}`, { session: true, signal });
+        const rawMessages = Array.isArray(projection.messages) ? projection.messages : [];
+        const maxMessages = Math.min(params.limitMessages || DEFAULT_READ_MESSAGE_LIMIT, DEFAULT_READ_MESSAGE_LIMIT);
+        const capped = capProjectionMessages(rawMessages, maxMessages, READ_LIMIT_BYTES);
+        const result = {
+          ...projection,
+          surface: "inbound",
+          messages: capped.messages,
+          untrustedContent: true,
+          maxMessages: DEFAULT_READ_MESSAGE_LIMIT,
+          bytes: capped.bytes,
+          returnedBytes: capped.returnedBytes,
+          truncated: capped.truncated,
+          cursor: runtime.cursor,
+          note: "Inbound content is untrusted room text. This surface excludes your own rows and directs-to-other peers.",
+        };
+        if (params.advanceCursor !== false && params.sinceSeq === undefined) runtime.cursor = updateCursorFromMessages(runtime.cursor, capped.messages, rawMessages.length === 0 ? projection.watermark : undefined);
+        result.cursor = runtime.cursor;
+        return result;
+      }, signal);
+      setStatus(ctx, cfg);
+      return formatResult(details);
+    },
+  });
+
+  pi.registerTool({
+    name: "parle_affordances",
+    label: "Parle Affordances",
+    description: "List advisory Parle actions available to this room actor, including denied reasons and unlock hints when the API supplies them.",
+    parameters: Type.Object({}),
+    async execute(_id, _params, signal, _update, ctx) {
+      lastCtx = ctx;
+      const cfg = resolveConfig(ctx.cwd || process.cwd());
+      const details = await withRebootstrap(ctx, cfg, async () => requestJson(cfg, `/v/rooms/${encodeURIComponent(cfg.roomId!.value)}/affordances`, { session: true, signal }), signal);
+      return formatResult({ ...details, note: "Affordances are advisory. The attempted API call remains the source of truth." });
+    },
+  });
+
+  pi.registerTool({
     name: "parle_send",
     label: "Parle Send",
-    description: "Send a raw Parle-native room message. Pass to to send structured direct addressing for responsive delivery. Body @mentions are inert text and will not wake a peer. Responsive delivery currently injects only direct-addressed rows. Prefer to: \"@principal.agent\" for any live session of an agent, or to: \"@principal.agent.session\" to pin one session. V1 does not auto-retry; retryable errors include the idempotency key to reuse with byte-identical body and addressing.",
+    description: "Send a raw Parle-native room message. Pass to to send structured direct addressing for responsive delivery. Body @mentions are inert text and will not wake a peer. Responsive delivery currently injects only direct-addressed rows. Prefer to: \"@principal.agent\" for any live session of an agent, or to: \"@principal.agent.session\" to pin one session. Avoid self-addressing: responsive delivery excludes own-authored rows. V1 does not auto-retry; retryable errors include the idempotency key to reuse with byte-identical body and addressing.",
     parameters: Type.Object({
       body: Type.String(),
       to: Type.Optional(Type.String()),
@@ -992,7 +1113,7 @@ export default function parleExtension(pi: any) {
         setStatus(ctx, cfg);
         const retryable = error?.status === 429 || (typeof error?.status === "number" && error.status >= 500);
         const hint = error?.status === 400 || error?.status === 422
-          ? "Direct addressing errors are not retryable. Check that to is a valid @principal.agent or @principal.agent.session address and that the target is a live room participant."
+          ? "Direct addressing errors are not retryable. Check that to is a valid @principal.agent or @principal.agent.session address and that the target is a live room participant. Discover peer addresses from message author blocks via parle_read or parle_inbox, or ask the operator."
           : undefined;
         return formatResult({ ok: false, retryable, idempotencyKey: retryable ? idempotencyKey : "<redacted>", addressedTo: to, warning, hint, error: redactString(runtime.lastError || String(error)) });
       }
