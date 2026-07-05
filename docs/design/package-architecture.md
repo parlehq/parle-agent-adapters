@@ -1,6 +1,6 @@
 # Package Architecture
 
-Status: design iteration, not yet implemented beyond placeholders  
+Status: design iteration, active Pi extension with placeholder client, MCP server, and Claude plugin packages  
 Date: 2026-07-04
 
 ## Decision
@@ -17,7 +17,6 @@ packages/
   claude-plugin/    # @parle/claude-plugin
 ```
 
-The current placeholder `packages/claude-extension` should be renamed to `packages/claude-plugin` before real Claude work begins.
 
 ## Why this shape
 
@@ -70,9 +69,15 @@ Owns:
 - safe base URL validation
 - auth header helpers
 - session bootstrap
+- 401 and session-404 re-bootstrap
+- heartbeat and best-effort session end primitives
 - participant join
-- projection read and cursor helpers
+- projection read and shared cursor helpers
+- inbound self-excluding read helpers
+- room affordances fetch
+- direct addressing payload helpers
 - message send helpers
+- structured delivery and moderation state
 - redaction and truncation utilities
 - typed error classes
 
@@ -96,14 +101,17 @@ Owns:
 - mapping client errors to MCP-safe responses
 - optional resource or prompt exposure if justified later
 
-Initial tools should mirror the Pi tool surface:
+Initial MCP v1 tools should mirror the safe Pi tool surface:
 
 - `parle_status`
 - `parle_setup`
 - `parle_guidance`
-- `parle_request`
 - `parle_read`
+- `parle_inbox`
+- `parle_affordances`
 - `parle_send`
+
+Defer `parle_request` from MCP v1. It is an advanced generic request surface and should return only after the safe tool set is proven, with explicit confirmation semantics and MCP tool annotations.
 
 ### `@parle/pi-extension`
 
@@ -116,6 +124,8 @@ Owns:
 - Pi tool schemas and execution wrappers
 - Pi lifecycle hooks only when needed
 - Pi-specific status presentation
+- watcher loop and responsive-delivery injection
+- Pi-specific guidance text and tool descriptions
 
 ### `packages/claude-plugin`
 
@@ -176,12 +186,12 @@ Distribution surfaces differ:
 
 ## Implementation sequence
 
-1. Rename `packages/claude-extension` to `packages/claude-plugin`.
-2. Add `packages/mcp-server` as a placeholder before Claude implementation starts.
-3. Extract headless client primitives from the existing Pi extension into `packages/client`.
-4. Rebuild the Pi extension on top of `@parle/agent-client`.
-5. Build `@parle/mcp-server` on top of `@parle/agent-client`.
-6. Package Claude Code support as `packages/claude-plugin` using the MCP server.
+1. Freeze the current Pi extension and tests as the extraction baseline.
+2. Extract headless client primitives from the existing Pi extension into `packages/client`.
+3. Rebuild the Pi extension on top of `@parle/agent-client` while preserving the current tests.
+4. Build `@parle/mcp-server` on top of `@parle/agent-client`.
+5. Package Claude Code support as `packages/claude-plugin` using the MCP server.
+6. Add Claude Desktop packaging separately as `packages/claude-desktop-extension` after MCP is proven.
 7. Add release tooling after package APIs stabilize, before public publication.
 
 ## Acceptance criteria before extraction starts
