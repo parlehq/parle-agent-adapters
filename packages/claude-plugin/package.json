@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@parle/agent-client": "workspace:*"
+    "@parle/mcp-server": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

@@ -11,10 +11,11 @@ Recommended package shape:
 
 ```text
 packages/
-  client/           # @parle/agent-client
-  mcp-server/       # @parle/mcp-server
-  pi-extension/     # @parle/pi-extension
-  claude-plugin/    # @parle/claude-plugin
+  client/                    # @parle/agent-client
+  mcp-server/                # @parle/mcp-server
+  pi-extension/              # @parle/pi-extension
+  claude-plugin/             # @parle/claude-plugin
+  claude-desktop-extension/  # future Claude Desktop MCPB package
 ```
 
 
@@ -54,6 +55,7 @@ The repo must not publish or document a single all-in-one runtime package. Users
 
 - Pi users install `@parle/pi-extension`.
 - Claude Code users install the Claude plugin.
+- Claude Desktop users install the future Desktop Extension bundle.
 - MCP host users may install `@parle/mcp-server` directly.
 
 ## Package responsibilities
@@ -155,7 +157,7 @@ packages/claude-plugin/
 
 Skills, hooks, scripts, and `.mcp.json` live at the plugin root. The `.claude-plugin/` directory holds plugin metadata. Hook scripts should use `${CLAUDE_PLUGIN_ROOT}` paths.
 
-The Claude plugin should not reimplement Parle protocol calls.
+The Claude plugin should not reimplement Parle protocol calls. It should launch or bundle `@parle/mcp-server`, not depend directly on `@parle/agent-client`.
 
 ## Repository conventions
 

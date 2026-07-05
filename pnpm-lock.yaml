@@ -27,9 +27,9 @@ importers:
 
   packages/claude-plugin:
     dependencies:
-      '@parle/agent-client':
+      '@parle/mcp-server':
         specifier: workspace:*
-        version: link:../client
+        version: link:../mcp-server
 
   packages/client: {}
 
