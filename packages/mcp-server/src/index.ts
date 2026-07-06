@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { ParleAgentClient, ParleApiError, ReadParams, SendParams } from "@parlehq/agent-client";
 
@@ -110,7 +111,11 @@ async function safeTool(fn: () => Promise<unknown>): Promise<any> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+export function isDirectRun(metaUrl: string, argvPath = process.argv[1]): boolean {
+  return Boolean(argvPath) && metaUrl === pathToFileURL(argvPath).href;
+}
+
+if (isDirectRun(import.meta.url)) {
   runStdio().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

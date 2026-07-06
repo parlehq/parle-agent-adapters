@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createParleMcpServer } from "../dist/index.js";
+import { pathToFileURL } from "node:url";
+import { createParleMcpServer, isDirectRun } from "../dist/index.js";
 
 const expectedTools = [
   "parle_affordances",
@@ -14,6 +15,11 @@ const expectedTools = [
   "parle_setup",
   "parle_status",
 ];
+
+test("direct-run detection handles URL-encoded paths", () => {
+  const path = "/tmp/Application Support/parle-mcp.js";
+  assert.equal(isDirectRun(pathToFileURL(path).href, path), true);
+});
 
 test("in-memory server maps read, send, and errors through fake client", async () => {
   const calls = [];

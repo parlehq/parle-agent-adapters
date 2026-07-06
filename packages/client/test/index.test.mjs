@@ -124,6 +124,23 @@ test("client bootstraps, reads inbox, and sends with direct addressing", async (
   assert.equal(JSON.parse(sendReq.init.body).payload.turn, undefined);
 });
 
+test("read cursor advances only through returned capped messages", async () => {
+  const client = new ParleAgentClient({
+    env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "opaque-token" },
+    fetch: async (url) => {
+      const u = String(url);
+      if (u.endsWith("/v/agent/sessions")) return json({ agent_session_id: "as-1", session_handle: "s1", expires_at: "later" }, 201);
+      if (u.endsWith("/participants")) return json({ participant_id: "part-1" }, 201);
+      if (u.includes("/projection")) return json({ watermark: 3, messages: [] });
+      if (u.includes("/inbound")) return json({ watermark: 5, messages: [{ seq: 4, content: "returned" }, { seq: 5, content: "not returned" }] });
+      return json({});
+    },
+  });
+  const result = await client.readInbox({ limitMessages: 1 });
+  assert.equal(result.messages.length, 1);
+  assert.equal(result.cursorAfter, 4);
+});
+
 test("retryable send errors return idempotency key for byte-identical retry", async () => {
   const client = new ParleAgentClient({
     env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "opaque-token" },
