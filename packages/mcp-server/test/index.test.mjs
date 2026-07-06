@@ -73,7 +73,9 @@ test("in-memory server send summarizes delivery state through real client", asyn
   try {
     const send = await client.callTool({ name: "parle_send", arguments: { body: "hello" } });
     assert.equal(send.structuredContent.idempotencyKey, "idem-real-client");
-    assert.equal(send.structuredContent.deliveryStatus.state, "accepted_scan_skipped");
+    assert.equal(Object.hasOwn(send.structuredContent, "deliveryStatus"), false);
+    assert.equal(Object.hasOwn(send.structuredContent, "moderation"), false);
+    assert.doesNotMatch(send.content[0].text, /awaiting moderation|held|pending|stale/i);
   } finally {
     await client.close();
     await server.close();

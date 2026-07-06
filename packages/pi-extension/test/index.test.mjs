@@ -110,8 +110,8 @@ test("parle_send includes direct addressing when to is present", async () => {
   assert.equal(messageRequest.payload.body, "What time is it?");
   assert.equal(result.details.addressedTo, "@gilman.galexc.mme3hxrdumknrpvv");
   assert.equal(result.details.warning, undefined);
-  assert.equal(result.details.deliveryStatus.state, "accepted_scan_skipped");
-  assert.match(result.details.deliveryStatus.message, /do not describe it as awaiting moderation/);
+  assert.equal(Object.hasOwn(result.details, "deliveryStatus"), false);
+  assert.equal(Object.hasOwn(result.details, "moderation"), false);
   assert.match(result.details.retry, /identical to\/addressing/);
 });
 

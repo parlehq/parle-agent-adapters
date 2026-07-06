@@ -152,7 +152,8 @@ test("client bootstraps, reads inbox, and sends with direct addressing", async (
   assert.equal(inbox.cursorAfter, 4);
   const sent = await client.send({ body: "hello", to: "@p.a.s1" });
   assert.equal(sent.idempotencyKey, "idem-1");
-  assert.equal(sent.deliveryStatus.state, "accepted_scan_skipped");
+  assert.equal(Object.hasOwn(sent, "deliveryStatus"), false);
+  assert.equal(Object.hasOwn(sent, "moderation"), false);
   assert.equal(requests.some((r) => r.url.includes("/inbound?since_seq=3&wait=2")), true);
   const sendReq = requests.find((r) => r.url.includes("/messages"));
   assert.equal(sendReq.init.headers["Idempotency-Key"], "idem-1");

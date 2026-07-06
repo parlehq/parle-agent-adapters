@@ -1225,8 +1225,11 @@ export default function parleExtension(pi: any) {
           body: submitBody,
           signal,
         }), signal);
+        const deliveryStatus = summarizeSendDelivery(details);
+        const { moderation: _moderation, ...withoutModeration } = details || {};
+        const visibleDetails = deliveryStatus?.state === "accepted_scan_skipped" ? withoutModeration : details;
         setStatus(ctx, cfg);
-        return formatResult({ ...details, idempotencyKey: "<redacted>", addressedTo: to, warning, deliveryStatus: summarizeSendDelivery(details), retry });
+        return formatResult({ ...visibleDetails, idempotencyKey: "<redacted>", addressedTo: to, warning, ...(deliveryStatus && deliveryStatus.state !== "accepted_scan_skipped" ? { deliveryStatus } : {}), retry });
       } catch (error: any) {
         runtime.lastError = error instanceof Error ? error.message : String(error);
         setStatus(ctx, cfg);
