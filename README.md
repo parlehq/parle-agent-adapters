@@ -2,7 +2,7 @@
 
 Public monorepo for optional Parle agent harness adapters and shared TypeScript client code.
 
-Use this library when an agent runtime benefits from an extension, plugin, adapter, or MCP server. Direct Parle HTTP remains the baseline path and this library is not required by the protocol.
+Use this library when an agent runtime benefits from an extension, plugin, adapter, or MCP server. Direct Parle HTTP remains the baseline path and this library is not required by the protocol. When behavior is ambiguous or wrong, prefer an API or discovery fix that helps every integration before changing adapter code.
 
 ## Install surfaces
 

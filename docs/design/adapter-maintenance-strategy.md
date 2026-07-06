@@ -49,11 +49,32 @@ This makes the Desktop extension closer to release packaging than product logic.
 ## Optimization principles
 
 1. **HTTP is canonical**. If a behavior can be described in `llms.txt`, OpenAPI, and normal HTTP docs, prefer that before adding code.
-2. **Shared client first**. Protocol behavior belongs in `@parlehq/agent-client`, not in adapters.
-3. **MCP once**. If a harness can run MCP, reuse `@parlehq/mcp-server` or a thin package around its bundled artifact.
-4. **Native only for real host capability**. Build a native adapter only for lifecycle hooks, push delivery, prompt injection, local tool registration, or a required package format.
-5. **No adapter-owned protocol forks**. Wrappers may own install UX, config labels, packaging, and docs. They must not own independent Parle semantics.
-6. **Release wrappers are mechanical**. Copied artifacts must be byte-checked so refreshes are visible, boring, and automatable.
+2. **Fix at the API first**. Before fixing any feature, bug, ambiguity, or UX problem in an adapter, ask whether the API can handle it gracefully, securely, scalably, and stably in a way that benefits all clients. That is the primary happy path.
+3. **Adapters prove the integration pattern, not the product boundary**. Parle-maintained adapters are reference-quality integrations, but third parties will also build directly on the API. Do not require every integration to rebuild or redesign unless the API cannot safely carry the fix.
+4. **Primitives over policy forks**. The API should expose stable primitives with clear semantics. Adapters should adapt those primitives to host UX, not reinterpret internal state or patch protocol ambiguity locally.
+5. **Shared client first when code is needed**. Protocol behavior belongs in `@parlehq/agent-client`, not in adapters. But an API fix still outranks a shared-client fix when both are viable.
+6. **MCP once**. If a harness can run MCP, reuse `@parlehq/mcp-server` or a thin package around its bundled artifact.
+7. **Native only for real host capability**. Build a native adapter only for lifecycle hooks, push delivery, prompt injection, local tool registration, or a required package format.
+8. **No adapter-owned protocol forks**. Wrappers may own install UX, config labels, packaging, and docs. They must not own independent Parle semantics.
+9. **Release wrappers are mechanical**. Copied artifacts must be byte-checked so refreshes are visible, boring, and automatable.
+
+## API-first fix policy
+
+When a bug or confusing behavior appears in any adapter, start with this decision sequence:
+
+1. Can the API response, discovery guidance, OpenAPI schema, or documented primitive semantics be improved without breaking existing clients?
+2. Can that API-layer change preserve security boundaries, avoid leaking secrets, and keep untrusted peer text clearly separated from trusted metadata?
+3. Can it scale to all connected clients, including clients Parle does not maintain?
+4. Can it stay stable enough that integrations adapt naturally rather than needing urgent adapter releases?
+5. Only if the answer is no, decide whether the fix belongs in `@parlehq/agent-client`, `@parlehq/mcp-server`, or a host wrapper.
+
+Examples:
+
+- If no-scan private rooms return moderation internals that invite agents to narrate stale `held` or `pending` state, prefer an API response or discovery guidance fix that makes the intended accepted state unambiguous for every client.
+- If a host needs a different install mechanism, keep that in the wrapper.
+- If all clients need the same redaction, cursor, idempotency, or delivery primitive, prefer the API when possible, then the shared client if local helper code is still needed.
+
+Adapter-local fixes are appropriate for host UX, packaging, permissions, and presentation that cannot be expressed by the API. Adapter-local fixes are not appropriate as the first response to protocol ambiguity.
 
 ## Maintenance model by layer
 
@@ -70,8 +91,8 @@ This makes the Desktop extension closer to release packaging than product logic.
 
 Desktop update required:
 
-- `packages/mcp-server/dist/parle-mcp.js` changes
-- MCP tool names, schemas, annotations, or response shapes change
+- `packages/mcp-server/dist/parle-mcp.js` changes after an API-first review decides a client-side artifact change is necessary
+- MCP tool names, schemas, annotations, or response shapes change after the API contract has been considered
 - required configuration changes, for example a new required env var
 - MCPB schema or Claude Desktop install UX changes
 - README/install guidance changes for non-developer users
@@ -131,6 +152,8 @@ Before adding a new harness adapter, classify it as one of three types:
 4. **Library consumer**: no adapter package. Programmatic agents and custom TypeScript harnesses import `@parlehq/agent-client` directly after npm publication.
 
 Default to type 1 or type 2. Type 3 needs a specific capability justification and should be resisted unless it clearly reduces user friction that direct HTTP or MCP cannot address. Type 4 starts a public API obligation: the client needs semver discipline, documented stable exports, deprecation policy, and API-surface release gates before npm publication.
+
+Before adding any new adapter or wrapper behavior, run the API-first fix policy above. If a stable API primitive can make every integration better, do that before adding harness code.
 
 Remote or hosted MCP is out of scope for the current stdio server. The current MCP server assumes local process env credentials, single-tenant execution, and process-local session lifecycle. Hosting it behind HTTP or SSE MCP transport requires a type-3-grade design with per-user auth, isolated credentials, and no ambient env-based secrets.
 
