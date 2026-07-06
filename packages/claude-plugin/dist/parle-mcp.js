@@ -31315,9 +31315,7 @@ var ParleAgentClient = class {
       return await this.withRebootstrap(async () => {
         const result = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId.value)}/messages`, { method: "POST", session: true, signal, headers: { "Idempotency-Key": idempotencyKey }, body });
         const deliveryStatus = summarizeSendDelivery(result);
-        const { moderation: _moderation, ...withoutModeration } = result || {};
-        const visibleResult = deliveryStatus?.state === "accepted_scan_skipped" ? withoutModeration : result;
-        return { ...visibleResult, idempotencyKey, warning: addressingWarning(params.body, params.to), ...deliveryStatus && deliveryStatus.state !== "accepted_scan_skipped" ? { deliveryStatus } : {} };
+        return { ...result, idempotencyKey, warning: addressingWarning(params.body, params.to), ...deliveryStatus ? { deliveryStatus } : {} };
       }, signal);
     } catch (error51) {
       if (error51 instanceof ParleApiError) {
