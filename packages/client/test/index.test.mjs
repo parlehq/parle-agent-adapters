@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { findForbiddenImports } from "../scripts/check-boundaries.mjs";
 import {
   ParleAgentClient,
   addressingWarning,
@@ -15,6 +19,21 @@ import {
   summarizeSendDelivery,
   updateCursorFromMessages,
 } from "../dist/index.js";
+
+test("client boundary scan ignores prose and detects forbidden import specifiers", () => {
+  assert.deepEqual(findForbiddenImports(new URL("../src", import.meta.url).pathname), []);
+  const dir = mkdtempSync(join(tmpdir(), "parle-client-boundary-"));
+  try {
+    writeFileSync(join(dir, "ok.ts"), "// mentioning mcp, claude, galexc, and pi in prose is fine\nexport const ok = true;\n");
+    assert.deepEqual(findForbiddenImports(dir), []);
+    writeFileSync(join(dir, "bad.ts"), "import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';\n");
+    const findings = findForbiddenImports(dir);
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0].specifier, "@modelcontextprotocol/sdk/server/mcp.js");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("config resolves env before files and redacts tokens", () => {
   const cfg = resolveConfig(process.cwd(), {
@@ -173,6 +192,130 @@ test("read cursor advances only through returned capped messages", async () => {
   const result = await client.readInbox({ limitMessages: 1 });
   assert.equal(result.messages.length, 1);
   assert.equal(result.cursorAfter, 4);
+});
+
+test("401 rebootstrap retries once and preserves cursor", async () => {
+  let sessions = 0;
+  let readAttempts = 0;
+  const client = new ParleAgentClient({
+    env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "opaque-token" },
+    fetch: async (url) => {
+      const u = String(url);
+      if (u.endsWith("/v/agent/sessions")) return json({ agent_session_id: `as-${++sessions}`, session_handle: `s${sessions}`, expires_at: "later" }, 201);
+      if (u.endsWith("/participants")) return json({ participant_id: "part-1" }, 201);
+      if (u.includes("/projection?wait=0")) return json({ watermark: 12, messages: [] });
+      if (u.includes("/projection?since_seq=")) {
+        readAttempts += 1;
+        return json({ error: { code: "unauthorized", message: "expired" } }, 401);
+      }
+      return json({});
+    },
+  });
+  await assert.rejects(() => client.readProjection(), { status: 401 });
+  assert.equal(sessions, 2);
+  assert.equal(readAttempts, 2);
+  assert.equal(client.runtime.cursor, 12);
+});
+
+test("session 404 rebootstrap retries once and surfaces second 404", async () => {
+  let sessions = 0;
+  let inboxAttempts = 0;
+  const client = new ParleAgentClient({
+    env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "opaque-token" },
+    fetch: async (url) => {
+      const u = String(url);
+      if (u.endsWith("/v/agent/sessions")) return json({ agent_session_id: `as-${++sessions}`, session_handle: `s${sessions}`, expires_at: "later" }, 201);
+      if (u.endsWith("/participants")) return json({ participant_id: "part-1" }, 201);
+      if (u.includes("/projection?wait=0")) return json({ watermark: 21, messages: [] });
+      if (u.includes("/inbound")) {
+        inboxAttempts += 1;
+        return json({ error: { code: "session_not_found", message: "missing" } }, 404);
+      }
+      return json({});
+    },
+  });
+  await assert.rejects(() => client.readInbox(), { status: 404 });
+  assert.equal(sessions, 2);
+  assert.equal(inboxAttempts, 2);
+  assert.equal(client.runtime.cursor, 21);
+});
+
+test("affordances rebootstrap after session 404 and preserve cursor", async () => {
+  let sessions = 0;
+  let affordanceAttempts = 0;
+  const client = new ParleAgentClient({
+    env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "opaque-token" },
+    fetch: async (url) => {
+      const u = String(url);
+      if (u.endsWith("/v/agent/sessions")) return json({ agent_session_id: `as-${++sessions}`, session_handle: `s${sessions}`, expires_at: "later" }, 201);
+      if (u.endsWith("/participants")) return json({ participant_id: "part-1" }, 201);
+      if (u.includes("/projection?wait=0")) return json({ watermark: 33, messages: [] });
+      if (u.includes("/affordances")) {
+        affordanceAttempts += 1;
+        if (affordanceAttempts === 1) return json({ error: { code: "session_not_found", message: "missing" } }, 404);
+        return json({ affordances: [{ action: "send" }] });
+      }
+      return json({});
+    },
+  });
+  const result = await client.affordances();
+  assert.deepEqual(result.affordances, [{ action: "send" }]);
+  assert.equal(sessions, 2);
+  assert.equal(affordanceAttempts, 2);
+  assert.equal(client.runtime.cursor, 33);
+});
+
+test("send reuses generated idempotency key across session 404 rebootstrap", async () => {
+  let sessions = 0;
+  let messageAttempts = 0;
+  const messageKeys = [];
+  const client = new ParleAgentClient({
+    env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "opaque-token" },
+    randomUUID: () => "idem-stable",
+    fetch: async (url, init = {}) => {
+      const u = String(url);
+      if (u.endsWith("/v/agent/sessions")) return json({ agent_session_id: `as-${++sessions}`, session_handle: `s${sessions}`, expires_at: "later" }, 201);
+      if (u.endsWith("/participants")) return json({ participant_id: "part-1" }, 201);
+      if (u.includes("/projection?wait=0")) return json({ watermark: 44, messages: [] });
+      if (u.includes("/messages")) {
+        messageAttempts += 1;
+        messageKeys.push(init.headers["Idempotency-Key"]);
+        if (messageAttempts === 1) return json({ error: { code: "session_not_found", message: "missing" } }, 404);
+        return json({ event_id: "evt-1", seq: 45 }, 201);
+      }
+      return json({});
+    },
+  });
+  const result = await client.send({ body: "hello" });
+  assert.equal(result.idempotencyKey, "idem-stable");
+  assert.deepEqual(messageKeys, ["idem-stable", "idem-stable"]);
+  assert.equal(sessions, 2);
+  assert.equal(client.runtime.cursor, 44);
+});
+
+test("send maps bootstrap setup errors into structured send failure", async () => {
+  const client = new ParleAgentClient({
+    env: { PARLE_ROOM_ID: "room-1" },
+    randomUUID: () => "idem-setup-needed",
+  });
+  const result = await client.send({ body: "hello" });
+  assert.equal(result.ok, false);
+  assert.equal(result.retryable, false);
+  assert.equal(result.idempotencyKey, "<redacted>");
+  assert.match(result.error, /PARLE_ROOM_AGENT_TOKEN is missing/);
+});
+
+test("requestJson wraps fetch timeout as retryable ParleApiError", async () => {
+  const client = new ParleAgentClient({
+    env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "opaque-token" },
+    fetch: async () => { throw new DOMException("timed out", "TimeoutError"); },
+  });
+  await assert.rejects(() => client.requestJson("/v/test"), (error) => {
+    assert.equal(error.name, "ParleApiError");
+    assert.equal(error.code, "timeout");
+    assert.equal(error.retryable, true);
+    return true;
+  });
 });
 
 test("retryable send errors return idempotency key for byte-identical retry", async () => {

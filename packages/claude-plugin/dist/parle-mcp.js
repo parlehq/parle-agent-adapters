@@ -31226,7 +31226,16 @@ var ParleAgentClient = class {
       headers["Parle-Agent-Session"] = this.runtime.sessionHandle;
     const timeout = options.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : void 0;
     const signal = options.signal && timeout ? AbortSignal.any([options.signal, timeout]) : options.signal || timeout;
-    const response = await this.fetchImpl(url2, { method: options.method || (options.body === void 0 ? "GET" : "POST"), headers, body: options.body === void 0 ? void 0 : JSON.stringify(options.body), signal });
+    let response;
+    try {
+      response = await this.fetchImpl(url2, { method: options.method || (options.body === void 0 ? "GET" : "POST"), headers, body: options.body === void 0 ? void 0 : JSON.stringify(options.body), signal });
+    } catch (error51) {
+      const name = typeof error51?.name === "string" ? error51.name : "";
+      if (name === "AbortError" || name === "TimeoutError" || signal?.aborted) {
+        throw new ParleApiError("Parle API request timed out or was aborted", { code: "timeout", retryable: true });
+      }
+      throw error51;
+    }
     this.runtime.lastHttpStatus = response.status;
     const text = redactString(await response.text());
     const json2 = parseJsonMaybe(text);
@@ -31298,22 +31307,22 @@ var ParleAgentClient = class {
     return this.withRebootstrap(() => this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId.value)}/affordances`, { session: true, signal }), signal);
   }
   async send(params, signal) {
-    return this.withRebootstrap(async () => {
-      const idempotencyKey = params.idempotencyKey || this.randomUUID();
-      const body = { type: "message_submitted", payload: { body: params.body } };
-      if (params.to)
-        body.addressing = { audience: "direct", to: params.to };
-      try {
+    const idempotencyKey = params.idempotencyKey || this.randomUUID();
+    const body = { type: "message_submitted", payload: { body: params.body } };
+    if (params.to)
+      body.addressing = { audience: "direct", to: params.to };
+    try {
+      return await this.withRebootstrap(async () => {
         const result = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId.value)}/messages`, { method: "POST", session: true, signal, headers: { "Idempotency-Key": idempotencyKey }, body });
         const deliveryStatus = summarizeSendDelivery(result);
         return { ...result, idempotencyKey, warning: addressingWarning(params.body, params.to), ...deliveryStatus ? { deliveryStatus } : {} };
-      } catch (error51) {
-        if (error51 instanceof ParleApiError) {
-          return { ok: false, retryable: error51.retryable, idempotencyKey: error51.retryable ? idempotencyKey : "<redacted>", addressedTo: params.to, warning: addressingWarning(params.body, params.to), error: redactString(error51.message) };
-        }
-        throw error51;
+      }, signal);
+    } catch (error51) {
+      if (error51 instanceof ParleApiError) {
+        return { ok: false, retryable: error51.retryable, idempotencyKey: error51.retryable ? idempotencyKey : "<redacted>", addressedTo: params.to, warning: addressingWarning(params.body, params.to), error: redactString(error51.message) };
       }
-    }, signal);
+      throw error51;
+    }
   }
   async guidance(target = "ai", signal) {
     const urls = {
