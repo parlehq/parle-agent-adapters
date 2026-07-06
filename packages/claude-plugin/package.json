@@ -7,8 +7,8 @@
     "@parlehq/mcp-server": "workspace:*"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-mcp-artifact.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "node scripts/copy-mcp-artifact.mjs",
+    "typecheck": "echo 'No TypeScript sources' && node scripts/check-mcp-artifact.mjs",
     "test": "node scripts/check-mcp-artifact.mjs && node --test test/*.test.mjs"
   }
 }

@@ -1,3 +1,8 @@
+---
+name: parle
+description: Coordinate through a Parle room using the Parle MCP tools (status, setup, inbox/read, send with direct addressing).
+---
+
 # Parle Claude Plugin Skill
 
 Use this skill when Parle MCP tools are available in Claude Code and the user wants to coordinate through a Parle room.

@@ -1,7 +1,8 @@
 node_modules/
 dist/
 !packages/claude-plugin/dist/
-!packages/claude-plugin/dist/**
+packages/claude-plugin/dist/*
+!packages/claude-plugin/dist/parle-mcp.js
 coverage/
 .env
 .parle/credentials

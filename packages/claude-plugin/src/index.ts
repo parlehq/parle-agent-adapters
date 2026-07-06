@@ -1,1 +1,0 @@
-export const PARLE_CLAUDE_EXTENSION_PLACEHOLDER = true;
