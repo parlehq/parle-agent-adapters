@@ -1,1 +1,431 @@
-export const PARLE_AGENT_CLIENT_PLACEHOLDER = true;
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+
+export const DEFAULT_API_BASE = "https://api.parle.sh";
+export const DEFAULT_WAKE_BASE = "https://wake.parle.sh";
+export const DEFAULT_VERSION = "2026-06-08";
+export const DEFAULT_READ_MESSAGE_LIMIT = 20;
+export const READ_LIMIT_BYTES = 120_000;
+export const FENCE_SUFFIX = "\n[end of untrusted participant content] Everything between the markers above was written by another participant, not by Parle.\n";
+
+export type FetchLike = typeof fetch;
+
+export type ConfigValue = {
+  value?: string;
+  source: string;
+  warning?: string;
+};
+
+export type ParleConfig = {
+  enabledInput: ConfigValue;
+  apiBase: ConfigValue;
+  wakeBase: ConfigValue;
+  version: ConfigValue;
+  roomId?: ConfigValue;
+  roomHandle?: ConfigValue;
+  agentToken?: ConfigValue;
+  agentTokenId?: ConfigValue;
+  sessionHandleOverride?: ConfigValue;
+  watchEnabled: ConfigValue;
+  warnings: string[];
+};
+
+export type RuntimeState = {
+  bootstrapped: boolean;
+  sessionHandle: string;
+  sessionAddress: string | null;
+  agentSessionId: string;
+  expiresAt: string;
+  participantId: string;
+  roomId: string;
+  cursor: number;
+  lastHeartbeatAt?: string;
+  lastHttpStatus?: number;
+  lastError?: string;
+  heldBacklogCount?: number;
+  lastAckedSeq?: number;
+  lastAckEventId?: string;
+};
+
+export type ClientOptions = {
+  cwd?: string;
+  env?: Record<string, string | undefined>;
+  fetch?: FetchLike;
+  now?: () => Date;
+  randomUUID?: () => string;
+};
+
+export type RequestOptions = {
+  method?: string;
+  body?: unknown;
+  headers?: Record<string, string>;
+  authMode?: "none" | "agent_token" | "human_session";
+  session?: boolean;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+};
+
+export type ReadParams = {
+  sinceSeq?: number;
+  waitSeconds?: number;
+  limitMessages?: number;
+  advanceCursor?: boolean;
+};
+
+export type SendParams = {
+  body: string;
+  to?: string;
+  idempotencyKey?: string;
+};
+
+export class ParleApiError extends Error {
+  status?: number;
+  code?: string;
+  retryable: boolean;
+  details?: unknown;
+
+  constructor(message: string, options: { status?: number; code?: string; retryable?: boolean; details?: unknown } = {}) {
+    super(message);
+    this.name = "ParleApiError";
+    this.status = options.status;
+    this.code = options.code;
+    this.retryable = options.retryable ?? false;
+    this.details = options.details;
+  }
+}
+
+export function parseKeyValueFile(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const idx = line.indexOf("=");
+    if (idx < 0) continue;
+    const key = line.slice(0, idx).trim();
+    let value = line.slice(idx + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+    out[key] = value;
+  }
+  return out;
+}
+
+function readKeyValueFile(path: string): Record<string, string> {
+  if (!existsSync(path)) return {};
+  return parseKeyValueFile(readFileSync(path, "utf8"));
+}
+
+function firstConfigValue(name: string, sources: Array<{ name: string; values: Record<string, string | undefined> }>, fallback?: string): ConfigValue {
+  for (const source of sources) {
+    const value = source.values[name];
+    if (value !== undefined && value !== "") return { value, source: source.name };
+  }
+  return { value: fallback, source: fallback === undefined ? "missing" : "default" };
+}
+
+export function resolveConfig(cwd = process.cwd(), env: Record<string, string | undefined> = process.env): ParleConfig {
+  const dotEnv = readKeyValueFile(join(cwd, ".env"));
+  const credentials = readKeyValueFile(join(cwd, ".parle", "credentials"));
+  const sources = [
+    { name: "env", values: env },
+    { name: ".env", values: dotEnv },
+    { name: ".parle/credentials", values: credentials },
+  ];
+  const cfg: ParleConfig = {
+    enabledInput: firstConfigValue("PARLE_ENABLED", sources, "1"),
+    apiBase: firstConfigValue("PARLE_API_BASE", sources, DEFAULT_API_BASE),
+    wakeBase: firstConfigValue("PARLE_WAKE_BASE", sources, DEFAULT_WAKE_BASE),
+    version: firstConfigValue("PARLE_VERSION", sources, DEFAULT_VERSION),
+    roomId: firstConfigValue("PARLE_ROOM_ID", sources),
+    roomHandle: firstConfigValue("PARLE_ROOM_HANDLE", sources),
+    agentToken: firstConfigValue("PARLE_ROOM_AGENT_TOKEN", sources),
+    agentTokenId: firstConfigValue("PARLE_AGENT_TOKEN_ID", sources),
+    sessionHandleOverride: firstConfigValue("PARLE_SESSION_HANDLE", sources),
+    watchEnabled: firstConfigValue("PARLE_WATCH_ENABLED", sources, "1"),
+    warnings: [],
+  };
+  for (const value of [cfg.apiBase, cfg.wakeBase, cfg.version, cfg.roomId, cfg.roomHandle, cfg.agentToken, cfg.agentTokenId, cfg.sessionHandleOverride, cfg.watchEnabled]) {
+    if (value?.warning) cfg.warnings.push(value.warning);
+  }
+  return cfg;
+}
+
+export function redactString(input: string): string {
+  return input
+    .replace(/parle_agt_[A-Za-z0-9._-]+/g, "parle_agt_<redacted>")
+    .replace(/prt_[A-Za-z0-9._-]+/g, "prt_<redacted>")
+    .replace(/(__Host-parle_session=)[^;\s]+/g, "$1<redacted>")
+    .replace(/(Authorization:\s*Bearer\s+)[^\s]+/gi, "$1<redacted>");
+}
+
+export function redactedValue(value?: ConfigValue): { source: string; configured: boolean; value?: string } {
+  if (!value?.value) return { source: value?.source || "missing", configured: false };
+  const sensitiveShape = /parle_agt_|prt_|__Host-parle_session/.test(value.value);
+  return { source: value.source, configured: true, value: sensitiveShape ? redactString(value.value) : value.value };
+}
+
+export function redactedSecretValue(value?: ConfigValue): { source: string; configured: boolean; value?: string } {
+  return { source: value?.source || "missing", configured: Boolean(value?.value), value: value?.value ? "<redacted>" : undefined };
+}
+
+export function truncateText(text: string, maxBytes: number): { text: string; truncated: boolean; bytes: number } {
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes <= maxBytes) return { text, truncated: false, bytes };
+  let out = text;
+  while (Buffer.byteLength(out + "\n[truncated]", "utf8") > maxBytes && out.length > 0) out = out.slice(0, -1);
+  return { text: out + "\n[truncated]", truncated: true, bytes };
+}
+
+export function assertSafeBase(base: string, env: Record<string, string | undefined> = process.env): void {
+  const url = new URL(base);
+  const isLocal = ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  if (isLocal && env.PARLE_ALLOW_INSECURE_LOCAL === "1") return;
+  if (url.protocol !== "https:") throw new Error(`Parle API base must use https: ${base}`);
+  if (!url.hostname.endsWith("parle.sh")) throw new Error(`Parle API base is not allowlisted: ${url.hostname}`);
+}
+
+export function clampWaitSeconds(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(30, Math.trunc(value))) : 0;
+}
+
+export function requestUrl(cfg: ParleConfig, pathOrUrl: string): URL {
+  const base = cfg.apiBase.value || DEFAULT_API_BASE;
+  return pathOrUrl.startsWith("http://") || pathOrUrl.startsWith("https://") ? new URL(pathOrUrl) : new URL(pathOrUrl, base);
+}
+
+export function wakeUrl(cfg: ParleConfig): URL {
+  return new URL("/v/agent/wake", cfg.wakeBase.value || cfg.apiBase.value || DEFAULT_WAKE_BASE);
+}
+
+export function parseSSEBlocks(buffer: string): { events: Array<{ event: string; data: string }>; rest: string } {
+  const events: Array<{ event: string; data: string }> = [];
+  const normalized = buffer.replace(/\r\n/g, "\n");
+  const parts = normalized.split("\n\n");
+  const rest = parts.pop() || "";
+  for (const block of parts) {
+    let event = "message";
+    const data: string[] = [];
+    for (const line of block.split("\n")) {
+      if (!line || line.startsWith(":")) continue;
+      if (line.startsWith("event:")) event = line.slice("event:".length).trim();
+      else if (line.startsWith("data:")) data.push(line.slice("data:".length).trimStart());
+    }
+    if (data.length > 0 || event !== "message") events.push({ event, data: data.join("\n") });
+  }
+  return { events, rest };
+}
+
+export function updateCursorFromMessages(cursor: number, messages: unknown[], watermark?: unknown): number {
+  let next = cursor || 0;
+  for (const message of messages) {
+    const seq = typeof (message as any)?.seq === "number" ? (message as any).seq : 0;
+    if (seq > next) next = seq;
+  }
+  if (messages.length === 0 && typeof watermark === "number" && watermark > next) next = watermark;
+  return next;
+}
+
+export function capProjectionMessages(messages: unknown[], maxMessages = DEFAULT_READ_MESSAGE_LIMIT, maxBytes = READ_LIMIT_BYTES) {
+  const capped: unknown[] = [];
+  let returnedBytes = 0;
+  for (const message of messages.slice(0, maxMessages)) {
+    const text = JSON.stringify(message);
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (returnedBytes + bytes > maxBytes) break;
+    capped.push(message);
+    returnedBytes += bytes;
+  }
+  return { messages: capped, bytes: Buffer.byteLength(JSON.stringify(messages), "utf8"), returnedBytes, truncated: capped.length < messages.length };
+}
+
+export function bodyLooksLikeAddressedText(body: string): boolean {
+  return /^\s*@[-a-z0-9_.]+\b/i.test(body);
+}
+
+export function addressingWarning(body: string, to?: string): string | undefined {
+  if (to || !bodyLooksLikeAddressedText(body)) return undefined;
+  return "Body @mentions do not address a Parle message. This message was sent unaddressed and will not wake a peer watcher. Pass to: \"@principal.agent\" or to: \"@principal.agent.session\" for responsive delivery.";
+}
+
+export function compactServerWrappedContent(content: string, preamble?: string, fence?: string | null): string {
+  if (!preamble || !fence) return content;
+  const open = `«FENCE BEGIN ${fence}»`;
+  const close = `«FENCE END ${fence}»`;
+  const expectedPrefix = preamble + "\n";
+  if (!content.startsWith(expectedPrefix) || !content.endsWith(FENCE_SUFFIX)) return content;
+  const fencedSpan = content.slice(expectedPrefix.length, content.length - FENCE_SUFFIX.length);
+  if (!fencedSpan.startsWith(open + "\n") || !fencedSpan.endsWith("\n" + close)) return content;
+  if (fencedSpan.indexOf(open) !== fencedSpan.lastIndexOf(open) || fencedSpan.indexOf(close) !== fencedSpan.lastIndexOf(close)) return content;
+  if (content !== expectedPrefix + fencedSpan + FENCE_SUFFIX) return content;
+  return fencedSpan;
+}
+
+export class ParleAgentClient {
+  readonly cfg: ParleConfig;
+  readonly fetchImpl: FetchLike;
+  readonly env: Record<string, string | undefined>;
+  readonly now: () => Date;
+  readonly randomUUID: () => string;
+  runtime: RuntimeState = {
+    bootstrapped: false,
+    sessionHandle: "",
+    sessionAddress: null,
+    agentSessionId: "",
+    expiresAt: "",
+    participantId: "",
+    roomId: "",
+    cursor: 0,
+  };
+
+  constructor(options: ClientOptions = {}) {
+    this.env = options.env || process.env;
+    this.cfg = resolveConfig(options.cwd, this.env);
+    this.fetchImpl = options.fetch || fetch;
+    this.now = options.now || (() => new Date());
+    this.randomUUID = options.randomUUID || randomUUID;
+  }
+
+  status() {
+    return {
+      config: {
+        enabledInput: redactedValue(this.cfg.enabledInput),
+        apiBase: redactedValue(this.cfg.apiBase),
+        wakeBase: redactedValue(this.cfg.wakeBase),
+        version: redactedValue(this.cfg.version),
+        roomId: redactedValue(this.cfg.roomId),
+        roomHandle: redactedValue(this.cfg.roomHandle),
+        agentToken: redactedSecretValue(this.cfg.agentToken),
+        agentTokenId: redactedValue(this.cfg.agentTokenId),
+      },
+      runtime: { ...this.runtime, sessionHandle: this.runtime.sessionHandle ? "<redacted>" : "", agentSessionId: this.runtime.agentSessionId ? "<redacted>" : "" },
+      warnings: this.cfg.warnings,
+    };
+  }
+
+  setup() {
+    const missing = [];
+    if (!this.cfg.roomId?.value) missing.push("PARLE_ROOM_ID");
+    if (!this.cfg.agentToken?.value) missing.push("PARLE_ROOM_AGENT_TOKEN");
+    return { ok: missing.length === 0, missing, apiBase: this.cfg.apiBase.value, note: missing.length ? "Set missing configuration in env, .env, or .parle/credentials." : "Parle configuration is present." };
+  }
+
+  assertConfigured() {
+    if (!this.cfg.roomId?.value) throw new ParleApiError("Parle setup needed: PARLE_ROOM_ID is missing", { code: "setup_needed" });
+    if (!this.cfg.agentToken?.value) throw new ParleApiError("Parle setup needed: PARLE_ROOM_AGENT_TOKEN is missing", { code: "setup_needed" });
+    assertSafeBase(this.cfg.apiBase.value || DEFAULT_API_BASE, this.env);
+    assertSafeBase(this.cfg.wakeBase.value || this.cfg.apiBase.value || DEFAULT_WAKE_BASE, this.env);
+  }
+
+  async requestJson(pathOrUrl: string, options: RequestOptions = {}): Promise<any> {
+    const url = requestUrl(this.cfg, pathOrUrl);
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      "Parle-Version": this.cfg.version.value || DEFAULT_VERSION,
+      ...options.headers,
+    };
+    if (options.body !== undefined) headers["Content-Type"] = "application/json";
+    if (options.authMode === "human_session") throw new ParleApiError("human_session auth is not implemented in @parlehq/agent-client yet", { code: "not_implemented" });
+    if (options.authMode !== "none") {
+      if (!this.cfg.agentToken?.value) throw new ParleApiError("Parle setup needed: PARLE_ROOM_AGENT_TOKEN is missing", { code: "setup_needed" });
+      headers.Authorization = `Bearer ${this.cfg.agentToken.value}`;
+    }
+    if (options.session && this.runtime.sessionHandle) headers["Parle-Agent-Session"] = this.runtime.sessionHandle;
+    const timeout = options.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined;
+    const signal = options.signal && timeout ? AbortSignal.any([options.signal, timeout]) : options.signal || timeout;
+    const response = await this.fetchImpl(url, { method: options.method || (options.body === undefined ? "GET" : "POST"), headers, body: options.body === undefined ? undefined : JSON.stringify(options.body), signal });
+    this.runtime.lastHttpStatus = response.status;
+    const text = await response.text();
+    const json = text ? JSON.parse(text) : {};
+    if (!response.ok) {
+      const code = json?.error?.code;
+      const msg = redactString(json?.error?.message || response.statusText || `HTTP ${response.status}`);
+      throw new ParleApiError(`Parle API ${response.status}: ${msg}`, { status: response.status, code, retryable: response.status >= 500 || response.status === 429, details: json });
+    }
+    return json;
+  }
+
+  async bootstrap(signal?: AbortSignal, preserveCursor = false) {
+    this.assertConfigured();
+    const previousCursor = this.runtime.cursor;
+    const body: Record<string, string> = {};
+    if (this.cfg.sessionHandleOverride?.value) body.session_handle = this.cfg.sessionHandleOverride.value;
+    const session = await this.requestJson("/v/agent/sessions", { method: "POST", body, signal });
+    this.runtime.sessionHandle = String(session.session_handle || "");
+    this.runtime.sessionAddress = typeof session.address === "string" ? session.address : null;
+    this.runtime.agentSessionId = String(session.agent_session_id || "");
+    this.runtime.expiresAt = String(session.expires_at || "");
+    this.runtime.roomId = this.cfg.roomId!.value!;
+    const entry = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId!.value!)}/participants`, { method: "POST", session: true, signal });
+    this.runtime.participantId = String(entry.participant_id || "");
+    this.runtime.bootstrapped = true;
+    if (preserveCursor) this.runtime.cursor = previousCursor;
+    else {
+      const projection = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId!.value!)}/projection?wait=0`, { session: true, signal });
+      this.runtime.cursor = typeof projection.watermark === "number" ? projection.watermark : 0;
+    }
+    return { ...this.runtime };
+  }
+
+  async ensureBootstrapped(signal?: AbortSignal) {
+    if (!this.runtime.bootstrapped || !this.runtime.sessionHandle) await this.bootstrap(signal);
+  }
+
+  async withRebootstrap<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    await this.ensureBootstrapped(signal);
+    try {
+      return await fn();
+    } catch (error: any) {
+      if (error?.status !== 401 && error?.status !== 404) throw error;
+      await this.bootstrap(signal, true);
+      return fn();
+    }
+  }
+
+  async readProjection(params: ReadParams = {}, signal?: AbortSignal) {
+    return this.readSurface("projection", params, signal);
+  }
+
+  async readInbox(params: ReadParams = {}, signal?: AbortSignal) {
+    return this.readSurface("inbound", params, signal);
+  }
+
+  private async readSurface(surface: "projection" | "inbound", params: ReadParams, signal?: AbortSignal) {
+    return this.withRebootstrap(async () => {
+      const since = typeof params.sinceSeq === "number" ? params.sinceSeq : this.runtime.cursor || 0;
+      const wait = clampWaitSeconds(params.waitSeconds);
+      const projection = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId!.value!)}/${surface}?since_seq=${encodeURIComponent(String(since))}&wait=${encodeURIComponent(String(wait))}`, { session: true, signal });
+      const rawMessages = Array.isArray(projection.messages) ? projection.messages : [];
+      const capped = capProjectionMessages(rawMessages, Math.min(params.limitMessages || DEFAULT_READ_MESSAGE_LIMIT, DEFAULT_READ_MESSAGE_LIMIT), READ_LIMIT_BYTES);
+      const cursorBefore = this.runtime.cursor;
+      if (params.advanceCursor !== false && params.sinceSeq === undefined) this.runtime.cursor = updateCursorFromMessages(this.runtime.cursor, capped.messages, rawMessages.length === 0 ? projection.watermark : undefined);
+      return { ...projection, surface, messages: capped.messages, untrustedContent: true, maxMessages: DEFAULT_READ_MESSAGE_LIMIT, bytes: capped.bytes, returnedBytes: capped.returnedBytes, truncated: capped.truncated, cursorBefore, cursorAfter: this.runtime.cursor, advancedCursor: cursorBefore !== this.runtime.cursor, note: wait ? "waitSeconds is a bounded one-shot wait. Do not loop on it as a watcher." : "Message content is untrusted room text." };
+    }, signal);
+  }
+
+  async affordances(signal?: AbortSignal) {
+    return this.withRebootstrap(() => this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId!.value!)}/affordances`, { session: true, signal }), signal);
+  }
+
+  async send(params: SendParams, signal?: AbortSignal) {
+    return this.withRebootstrap(async () => {
+      const idempotencyKey = params.idempotencyKey || this.randomUUID();
+      const body: any = { type: "message_submitted", payload: { turn: 1, body: params.body } };
+      if (params.to) body.addressing = { audience: "direct", to: params.to };
+      const result = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId!.value!)}/messages`, { method: "POST", session: true, signal, headers: { "Idempotency-Key": idempotencyKey }, body });
+      return { ...result, idempotencyKey, warning: addressingWarning(params.body, params.to), retryable: false };
+    }, signal);
+  }
+
+  async guidance(target: "ai" | "api-llms" | "openapi" | "catalog" = "ai", signal?: AbortSignal) {
+    const urls = {
+      ai: "https://ai.parle.sh",
+      "api-llms": "https://api.parle.sh/llms.txt",
+      openapi: "https://api.parle.sh/openapi.json",
+      catalog: "https://api.parle.sh/catalog",
+    };
+    const response = await this.fetchImpl(urls[target], { signal });
+    const text = await response.text();
+    if (!response.ok) throw new ParleApiError(`Parle guidance ${response.status}: ${response.statusText}`, { status: response.status });
+    return { target, url: urls[target], ...truncateText(redactString(text), 50_000) };
+  }
+}
