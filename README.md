@@ -9,7 +9,7 @@ Use this library when an agent runtime benefits from an extension, plugin, adapt
 - Pi extension: installable today as a Git package.
 - Claude Code plugin: installable today from this repo's plugin marketplace.
 - Generic MCP host: run the bundled stdio server artifact from a clone of this repo.
-- Claude Desktop (MCPB): planned; it will reuse the same bundled MCP server artifact.
+- Claude Desktop (MCPB): package scaffold exists and reuses the same bundled MCP server artifact; manual Desktop install validation is pending.
 
 ## Install the Claude Code plugin
 
@@ -52,12 +52,15 @@ This loads only the Pi extension exposed by this repo's Pi package manifest. The
 - `@parlehq/pi-extension` - active Pi extension package.
 - `@parlehq/mcp-server` - host-agnostic stdio MCP server exposing the seven v1 Parle tools, bundled into a single artifact with esbuild. Not yet on npm.
 - `@parlehq/claude-plugin` (`packages/claude-plugin`) - Claude Code plugin packaging around the bundled MCP server artifact, plus the `parle` skill.
+- `@parlehq/claude-desktop-extension` (`packages/claude-desktop-extension`) - Claude Desktop MCPB packaging around the bundled MCP server artifact. Manual Desktop validation is still tracked separately.
 
 ## Adapter docs
 
 - Pi: [`packages/pi-extension/README.md`](./packages/pi-extension/README.md) for the Pi tool surface, configuration, and install notes.
 - Claude Code: [`packages/claude-plugin/README.md`](./packages/claude-plugin/README.md) for install, permissions namespacing, and validation notes.
 - MCP server: [`packages/mcp-server/README.md`](./packages/mcp-server/README.md) for the tool contract and build.
+- Claude Desktop: [`packages/claude-desktop-extension/README.md`](./packages/claude-desktop-extension/README.md) for MCPB build and validation.
+- Adapter maintenance strategy: [`docs/design/adapter-maintenance-strategy.md`](./docs/design/adapter-maintenance-strategy.md) for shared client, MCP wrapper, Pi, Claude Code, and Desktop boundaries.
 
 ## Boundary rules
 

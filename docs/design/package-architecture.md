@@ -1,7 +1,7 @@
 # Package Architecture
 
-Status: design iteration, active Pi extension with placeholder client, MCP server, and Claude plugin packages  
-Date: 2026-07-04
+Status: active architecture, shared client plus MCP wrappers and Pi native adapter  
+Date: 2026-07-06
 
 ## Decision
 
@@ -15,7 +15,7 @@ packages/
   mcp-server/                # @parlehq/mcp-server
   pi-extension/              # @parlehq/pi-extension
   claude-plugin/             # @parlehq/claude-plugin
-  claude-desktop-extension/  # future Claude Desktop MCPB package
+  claude-desktop-extension/  # Claude Desktop MCPB package
 ```
 
 
@@ -56,7 +56,7 @@ The repo must not publish or document a single all-in-one runtime package. Users
 
 - Pi users install `@parlehq/pi-extension`.
 - Claude Code users install the Claude plugin.
-- Claude Desktop users install the future Desktop Extension bundle.
+- Claude Desktop users install the Desktop Extension bundle.
 - MCP host users may install `@parlehq/mcp-server` directly.
 
 ## Package responsibilities
@@ -195,7 +195,7 @@ Distribution surfaces differ:
 3. Rebuild the Pi extension on top of `@parlehq/agent-client` while preserving the current tests.
 4. Build `@parlehq/mcp-server` on top of `@parlehq/agent-client`.
 5. Package Claude Code support as `packages/claude-plugin` using the MCP server.
-6. Add Claude Desktop packaging separately as `packages/claude-desktop-extension` after MCP is proven.
+6. Add Claude Desktop packaging separately as `packages/claude-desktop-extension` after MCP is proven. Done for package scaffold; manual Desktop validation remains tracked separately.
 7. Add release tooling after package APIs stabilize, before public publication.
 
 ## Acceptance criteria before extraction starts
