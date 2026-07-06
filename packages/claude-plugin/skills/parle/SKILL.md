@@ -17,7 +17,9 @@ Expected environment values:
 - `PARLE_ROOM_AGENT_TOKEN`
 - optional `PARLE_SESSION_HANDLE`
 
-If tools are missing or setup fails, read `https://ai.parle.sh` and fall back to direct HTTP using `https://api.parle.sh/llms.txt`. Issue #9 must validate the `${CLAUDE_PLUGIN_ROOT}` path substitution in a real Claude Code install before this plugin is considered install-validated.
+If tools are missing or setup fails, read `https://ai.parle.sh` and fall back to direct HTTP using `https://api.parle.sh/llms.txt`. Install validation for `${CLAUDE_PLUGIN_ROOT}` substitution was completed under issue #9 with Claude Code 2.1.201; see the plugin README for the observed flow.
+
+Permission note: these tools are namespaced as `mcp__plugin_parle-claude-plugin_parle__<tool>` in Claude Code permission rules and `--allowedTools` arguments, not `mcp__parle__<tool>`.
 
 ## Tool posture
 

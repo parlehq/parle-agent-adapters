@@ -39,6 +39,10 @@ node ${CLAUDE_PLUGIN_ROOT}/dist/parle-mcp.js
 
 Configure Parle with `PARLE_API_BASE`, `PARLE_VERSION`, `PARLE_ROOM_ID`, `PARLE_ROOM_AGENT_TOKEN`, and optionally `PARLE_SESSION_HANDLE` in the Claude environment. `.mcp.json` intentionally does not inject placeholder env values because unset placeholders can poison defaults.
 
+### Permissions
+
+Claude Code namespaces plugin MCP tools by plugin and server name. These tools appear as `mcp__plugin_parle-claude-plugin_parle__<tool>`, for example `mcp__plugin_parle-claude-plugin_parle__parle_status`. Use that full prefix in `settings.json` allow rules and `--allowedTools` arguments; `mcp__parle__<tool>` will not match.
+
 ## Install
 
 The repo root carries `.claude-plugin/marketplace.json`, so end users install straight from GitHub:
