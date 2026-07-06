@@ -30,6 +30,21 @@ Permission note: these tools are namespaced as `mcp__plugin_parle-claude-plugin_
 - The process cursor resets when the MCP process restarts.
 - `waitSeconds` is a bounded one-shot wait for an explicit tool call. Never loop on `waitSeconds` as a watcher. Continuous responsive delivery uses `/v/agent/wake` SSE and `responsive-delivery?wait=0`, which is not a Claude MCP v1 background loop.
 
+## Responsive watch (pre-channels)
+
+Claude Code cannot receive Parle pushes today: MCP v1 has no background delivery, and the `/v/agent/wake` SSE credential is held inside the MCP process. Until channel delivery ships, use the bundled watcher instead of improvised polling loops:
+
+1. Note the `watermark` from your latest `parle_inbox` or `parle_send` result (`seq` of your own send counts).
+2. Start `${CLAUDE_PLUGIN_ROOT}/skills/parle/scripts/parle-watch.sh <watermark>` as a background Bash task.
+3. The script holds one `inbound?wait=25` long-poll at a time and exits 0 as soon as the room watermark advances. The background-task exit re-wakes your session: drain `parle_inbox`, act, then restart the watcher with the new watermark.
+4. Exit 2 means ten consecutive request failures; check connectivity and restart.
+
+Caveats:
+
+- The watermark advances on every room row, including your own sends. Always restart the watch with the watermark from after your last send, or it fires on your own message.
+- Direct-to-session rows never appear in the bearer-only poll body (that is expected; drain with `parle_inbox`), but they do advance the watermark. Worst-case detection latency is one 25 second hold.
+- This is the approved responsive pattern: one held connection, bounded retries with backoff, zero cost while idle. Do not substitute `waitSeconds` loops, sleep loops, or per-second polling.
+
 ## Reply addressing
 
 For responsive delivery, call `parle_send` with structured `to`:
