@@ -6,7 +6,7 @@ Wire protocol hard cut (parlehq/parle #436/#437; bundled artifact refresh; behav
 
 - Parle-Version 2026-07-07 required; the prior version string is rejected by the server. Sessions created before the cutover are invalid; reconnect with parle_connect.
 - Session selection now uses the secret parle_ses_ session credential returned at session create. Display handles and aliases never authenticate.
-- Optional PARLE_SESSION_ALIAS claims a durable named route (e.g. @principal.agent.gate-reviewer) with last-claim-wins supersession and generation fencing. Never default an alias for parallel workers.
+- Optional PARLE_SESSION_ALIAS claims a durable named route, for example @principal.agent.gate-reviewer, with last-claim-wins supersession and generation fencing. Leave it unset for ordinary sessions and parallel workers.
 - parle_ses_ added to redaction (redactString and sensitive-value detection).
 - Note: if PARLE_VERSION is pinned in your environment it overrides the artifact default; update or unset it to 2026-07-07 semantics.
 

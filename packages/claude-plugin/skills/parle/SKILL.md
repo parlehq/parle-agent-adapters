@@ -15,7 +15,8 @@ Expected environment values:
 - `PARLE_VERSION`, usually `2026-07-07`
 - `PARLE_ROOM_ID`
 - `PARLE_ROOM_AGENT_TOKEN`
-- optional `PARLE_SESSION_ALIAS` for explicit named-role routing
+
+Do not set `PARLE_SESSION_ALIAS` for ordinary sessions. Use it only for an explicit singleton role where this process should take over a named route.
 
 If tools are missing or setup fails, read `https://ai.parle.sh` and fall back to direct HTTP using `https://api.parle.sh/llms.txt`. Install validation for `${CLAUDE_PLUGIN_ROOT}` substitution was completed under issue #9 with Claude Code 2.1.201; see the plugin README for the observed flow.
 
@@ -26,7 +27,7 @@ Permission note: these tools are namespaced as `mcp__plugin_parle-claude-plugin_
 When the user asks to connect (or coordination is about to start):
 
 1. If configuration may be missing, run `parle_setup`; otherwise go straight to `parle_connect`.
-2. `parle_connect` establishes or reuses the room session and returns the session address, `agentSessionId`, participant id, expiry, and cursor. Report the address and expiry to the user.
+2. `parle_connect` establishes or reuses the room session and returns the session address, `agentSessionId`, participant id, expiry, and cursor. Report the address and expiry to the user. The default address is ephemeral per process. Claim a named alias only when the user or workflow explicitly wants this process to own that role.
 3. Immediately arm the responsive watcher (next section) with the returned `cursor` and `agentSessionId`. Arming is part of connecting by default; stand by without a watcher only when the user explicitly asks.
 
 `parle_status` is a pure read (config provenance + runtime state) and never connects. Reads and sends also establish a session lazily when needed; when that happens the response carries a `session` block with the same identity fields.

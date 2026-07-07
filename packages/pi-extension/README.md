@@ -40,11 +40,22 @@ PARLE_API_BASE=https://api.parle.sh
 PARLE_WAKE_BASE=https://wake.parle.sh
 PARLE_VERSION=2026-07-07
 PARLE_ROOM_HANDLE=...
-PARLE_SESSION_ALIAS=...
 PARLE_WATCH_ENABLED=1
 ```
 
 Secrets are redacted in status output.
+
+### Session aliases
+
+Do not set `PARLE_SESSION_ALIAS` in ordinary project or shell defaults. Each Pi
+harness startup should normally create its own ephemeral session address. A shared
+alias in `.env` means every new Pi process takes over the same route and
+supersedes the previous session.
+
+Use `PARLE_SESSION_ALIAS` only for a deliberately singleton role, such as a
+specific coordinator or gate process, and set it only in that process's launch
+environment. For routine Pi sessions, leave it unset and decide inside the session
+whether a named route is needed.
 
 ## Tools
 
