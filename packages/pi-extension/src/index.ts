@@ -123,6 +123,7 @@ let runtime: RuntimeState = { bootstrapped: false, watcherState: "off" };
 let lastCtx: any | undefined;
 let watcherAbort: AbortController | undefined;
 let watcherLoopRunning = false;
+let activeWatcherRunId = 0;
 const injectedKeys = new Set<string>();
 const injectedKeyOrder: string[] = [];
 
@@ -844,8 +845,7 @@ async function injectResponsiveMessage(pi: any, ctx: any, cfg: ParleConfig, mess
   setStatus(ctx, cfg);
 }
 
-async function runWatcher(pi: any, ctx: any, cfg: ParleConfig, signal: AbortSignal) {
-  if (watcherLoopRunning) return;
+async function runWatcher(pi: any, ctx: any, cfg: ParleConfig, signal: AbortSignal, runId: number) {
   watcherLoopRunning = true;
   runtime.watcherStarted = true;
   runtime.watcherEnabled = true;
@@ -871,19 +871,25 @@ async function runWatcher(pi: any, ctx: any, cfg: ParleConfig, signal: AbortSign
       }
     }
   } finally {
-    watcherLoopRunning = false;
-    runtime.watcherState = signal.aborted ? "disconnected" : "off";
-    setStatus(ctx, cfg);
+    if (runId === activeWatcherRunId) {
+      watcherLoopRunning = false;
+      runtime.watcherState = signal.aborted ? "disconnected" : "off";
+      setStatus(ctx, cfg);
+    }
   }
 }
 
 function startWatcher(pi: any, ctx: any, cfg = resolveConfig(ctx.cwd || process.cwd())) {
-  if (!watcherConfigured(cfg) || watcherLoopRunning) return;
+  if (!watcherConfigured(cfg)) return;
+  if (watcherLoopRunning && watcherAbort && !watcherAbort.signal.aborted) return;
+  watcherAbort?.abort();
   watcherAbort = new AbortController();
-  void runWatcher(pi, ctx, cfg, watcherAbort.signal);
+  const runId = ++activeWatcherRunId;
+  void runWatcher(pi, ctx, cfg, watcherAbort.signal, runId);
 }
 
 function stopWatcher(ctx?: any) {
+  activeWatcherRunId += 1;
   watcherAbort?.abort();
   watcherAbort = undefined;
   runtime.watcherEnabled = false;
@@ -966,6 +972,7 @@ export const __testing = {
   resolveConfig,
   runtimeState() { return runtime; },
   patchRuntime(patch: Partial<RuntimeState>) { runtime = { ...runtime, ...patch }; },
+  setStatus,
   resetRuntime() {
     runtime = { bootstrapped: false, watcherState: "off" };
     injectedKeys.clear();
@@ -973,17 +980,21 @@ export const __testing = {
     watcherAbort?.abort();
     watcherAbort = undefined;
     watcherLoopRunning = false;
+    activeWatcherRunId = 0;
   },
 };
 
 function setStatus(ctx: any, cfg = resolveConfig(ctx.cwd || process.cwd())) {
-  if (!ctx?.ui?.setStatus) return;
-  let label = "parle x setup";
-  if (!cfg.enabled) label = "parle off";
-  else if (shouldShowFooterError()) label = runtime.sessionAddress ? `parle x ${runtime.sessionAddress}` : `parle x ${runtime.watcherState || "error"}`;
-  else if (runtime.sessionAddress) label = `parle ✓ ${runtime.sessionAddress}`;
-  else if (cfg.roomId?.value && cfg.agentToken?.value) label = `parle ✓ ${cfg.roomHandle?.value || "ready"}`;
-  try { ctx.ui.setStatus(EXTENSION_ID, label); } catch {}
+  try {
+    const ui = ctx?.ui;
+    if (!ui?.setStatus) return;
+    let label = "parle x setup";
+    if (!cfg.enabled) label = "parle off";
+    else if (shouldShowFooterError()) label = runtime.sessionAddress ? `parle x ${runtime.sessionAddress}` : `parle x ${runtime.watcherState || "error"}`;
+    else if (runtime.sessionAddress) label = `parle ✓ ${runtime.sessionAddress}`;
+    else if (cfg.roomId?.value && cfg.agentToken?.value) label = `parle ✓ ${cfg.roomHandle?.value || "ready"}`;
+    ui.setStatus(EXTENSION_ID, label);
+  } catch {}
 }
 
 export default function parleExtension(pi: any) {

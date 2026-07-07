@@ -191,6 +191,18 @@ test("parle_inbox reads the inbound attention surface", async () => {
   assert.match(result.details.note, /excludes your own rows/);
 });
 
+test("setStatus ignores stale Pi UI contexts", () => {
+  const cwd = tempProject("PARLE_ROOM_ID=room-1\nPARLE_ROOM_AGENT_TOKEN=token-1\n");
+  const staleCtx = {
+    cwd,
+    get ui() {
+      throw new Error("This extension ctx is stale after session replacement or reload.");
+    },
+  };
+
+  assert.doesNotThrow(() => __testing.setStatus(staleCtx));
+});
+
 test("parle_affordances wraps the room affordances endpoint", async () => {
   let sawAffordances = false;
   const harness = installSendHarness(async (url) => {
