@@ -196,6 +196,12 @@ function resolveConfig(cwd: string): ParleConfig {
   for (const value of [cfg.apiBase, cfg.wakeBase, cfg.version, cfg.roomId, cfg.roomHandle, cfg.agentToken, cfg.agentTokenId, cfg.sessionAlias, cfg.watchEnabled]) {
     if (value?.warning) cfg.warnings.push(value.warning);
   }
+  // Process env is a startup snapshot; project .env is regenerated on rotation.
+  // When they disagree on the token, the snapshot is almost certainly stale.
+  const diskToken = projectEnv.PARLE_ROOM_AGENT_TOKEN || projectParle.PARLE_ROOM_AGENT_TOKEN;
+  if (cfg.agentToken?.source === "env" && diskToken && diskToken !== cfg.agentToken?.value) {
+    cfg.warnings.push("PARLE_ROOM_AGENT_TOKEN on disk differs from the process environment snapshot. The token was likely rotated. Restart the harness process to reload it.");
+  }
   return cfg;
 }
 

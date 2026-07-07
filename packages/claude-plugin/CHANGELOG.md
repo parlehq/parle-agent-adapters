@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 (2026-07-07)
+
+Stale-credential diagnostics (bundled `@parlehq/agent-client` refresh). Configuration is resolved once at MCP server start with precedence process env > .env > .parle/credentials; a token rotated on disk afterwards cannot take effect until the host process restarts. Previously that failure surfaced as a bare `Parle API 401` with no remediation path.
+
+- 401 errors now append a hint when PARLE_ROOM_AGENT_TOKEN on disk (.env or .parle/credentials, in precedence order) differs from the value the process loaded at startup: the token was likely rotated and the host process needs a restart.
+- `parle_setup` reports `ok: false` with a `warning` when the loaded token diverges from disk (previously a stale token passed as `ok: true`), and `parle_status` includes the same warning in `warnings`.
+- The Pi extension pushes an equivalent warning into its config warnings when the process env snapshot shadows a different on-disk token.
+- SKILL and README now document source precedence, the read-once snapshot semantics, and the rotation procedure.
+
 ## 0.3.0 (2026-07-07)
 
 Wire protocol hard cut (parlehq/parle #436/#437; bundled artifact refresh; behavior shipped in adapters commit 207c8cc without a version bump - this release corrects that):

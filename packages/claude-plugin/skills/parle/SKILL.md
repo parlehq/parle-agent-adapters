@@ -18,6 +18,14 @@ Expected environment values:
 
 Do not set `PARLE_SESSION_ALIAS` for ordinary sessions. Use it only for an explicit singleton role where this process should take over a named route.
 
+Source precedence and snapshot semantics:
+
+- Values resolve from three sources, first non-empty wins: process environment, then `<cwd>/.env`, then `<cwd>/.parle/credentials`. A stale process-env value shadows a corrected `.env`.
+- Configuration loads ONCE when the MCP server process starts. Nothing re-reads it mid-session. The plugin never writes any of these files; `parle_setup` is diagnostic only.
+- Harness env injectors (for example mise `[env] _.file = ".env"`) snapshot `.env` into the process environment at shell init, which becomes the highest-precedence source.
+
+Token rotation procedure: after rotating `PARLE_ROOM_AGENT_TOKEN` (revoke old, mint new, update the secret store and `.env`), restart every consumer -- the Claude Code session (so the MCP server reloads config), any running `parle-watch.sh` (it inherits its launch env and will exit 2 after ten straight failures on a dead token), and any other harness holding the old snapshot. Symptom of a missed restart: a sudden bare `Parle API 401` mid-session; since 0.3.1 the error, `parle_setup`, and `parle_status` all warn when the loaded token differs from the on-disk value.
+
 If tools are missing or setup fails, read `https://ai.parle.sh` and fall back to direct HTTP using `https://api.parle.sh/llms.txt`. Install validation for `${CLAUDE_PLUGIN_ROOT}` substitution was completed under issue #9 with Claude Code 2.1.201; see the plugin README for the observed flow.
 
 Permission note: these tools are namespaced as `mcp__plugin_parle-claude-plugin_parle__<tool>` in Claude Code permission rules and `--allowedTools` arguments, not `mcp__parle__<tool>`.

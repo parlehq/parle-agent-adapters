@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 (2026-07-07)
+
+Stale-credential diagnostics (bundled `@parlehq/agent-client` refresh):
+
+- 401 errors append a hint when PARLE_ROOM_AGENT_TOKEN on disk differs from the value the process loaded at startup (token likely rotated; restart the host process to reload it).
+- `parle_setup` reports `ok: false` with a `warning` on a stale-vs-disk token; `parle_status` carries the same warning in `warnings`.
+
 ## 0.3.0 (2026-07-07)
 
 Wire protocol hard cut (parlehq/parle #436/#437; bundled artifact refresh; behavior shipped in adapters commit 207c8cc without a version bump - this release corrects that):

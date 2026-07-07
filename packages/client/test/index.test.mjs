@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { findForbiddenImports } from "../scripts/check-boundaries.mjs";
@@ -443,6 +443,80 @@ test("status exposes agent_session_id, redacts session handle, marks optional co
   assert.equal(status.runtime.sessionHandle, "<redacted>");
   assert.equal(status.config.agentTokenId.optional, true);
   assert.match(client.setup().note, /holds a session/);
+});
+
+test("connect-time 401 carries a stale-token hint when the on-disk token differs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "parle-client-stale-"));
+  try {
+    writeFileSync(join(dir, ".env"), "PARLE_ROOM_AGENT_TOKEN=new-rotated-token\n");
+    const client = new ParleAgentClient({
+      cwd: dir,
+      env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "old-snapshot-token" },
+      fetch: async () => json({ error: { code: "unauthenticated", message: "missing or invalid credential" } }, 401),
+    });
+    await assert.rejects(() => client.connect(), (error) => {
+      assert.equal(error.status, 401);
+      assert.match(error.message, /likely rotated/);
+      assert.match(error.message, /\.env/);
+      assert.match(error.message, /source: env/);
+      return true;
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("401 without on-disk divergence carries no stale-token hint", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "parle-client-fresh-"));
+  try {
+    writeFileSync(join(dir, ".env"), "PARLE_ROOM_AGENT_TOKEN=same-token\n");
+    const client = new ParleAgentClient({
+      cwd: dir,
+      env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "same-token" },
+      fetch: async () => json({ error: { code: "unauthenticated", message: "missing or invalid credential" } }, 401),
+    });
+    await assert.rejects(() => client.connect(), (error) => {
+      assert.equal(error.status, 401);
+      assert.doesNotMatch(error.message, /likely rotated/);
+      return true;
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("matching .env shadows a stale .parle/credentials in the divergence check", () => {
+  const dir = mkdtempSync(join(tmpdir(), "parle-client-shadow-"));
+  try {
+    writeFileSync(join(dir, ".env"), "PARLE_ROOM_AGENT_TOKEN=same-token\n");
+    mkdirSync(join(dir, ".parle"));
+    writeFileSync(join(dir, ".parle", "credentials"), "PARLE_ROOM_AGENT_TOKEN=stale-leftover\n");
+    const client = new ParleAgentClient({
+      cwd: dir,
+      env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "same-token" },
+    });
+    assert.equal(client.staleTokenHint(), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("setup and status surface the stale-token warning", () => {
+  const dir = mkdtempSync(join(tmpdir(), "parle-client-setup-stale-"));
+  try {
+    writeFileSync(join(dir, ".env"), "PARLE_ROOM_AGENT_TOKEN=new-rotated-token\n");
+    const client = new ParleAgentClient({
+      cwd: dir,
+      env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "old-snapshot-token" },
+    });
+    const setup = client.setup();
+    assert.equal(setup.ok, false);
+    assert.deepEqual(setup.missing, []);
+    assert.match(setup.warning, /likely rotated/);
+    assert.ok(client.status().warnings.some((w) => /likely rotated/.test(w)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 function json(body, status = 200) {

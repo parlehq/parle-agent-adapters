@@ -39,6 +39,8 @@ node ${CLAUDE_PLUGIN_ROOT}/dist/parle-mcp.js
 
 Configure Parle with `PARLE_API_BASE`, `PARLE_VERSION`, `PARLE_ROOM_ID`, and `PARLE_ROOM_AGENT_TOKEN` in the Claude environment. `.mcp.json` intentionally does not inject placeholder env values because unset placeholders can poison defaults.
 
+Config sources resolve in strict precedence -- process environment, then `<cwd>/.env`, then `<cwd>/.parle/credentials` -- and load once at MCP server start. The plugin never writes these files. A token rotated on disk after launch does not take effect (and a stale process-env value shadows a corrected `.env`) until the Claude Code session restarts; since 0.3.1, 401 errors, `parle_setup`, and `parle_status` warn when the loaded token differs from the on-disk value.
+
 Leave `PARLE_SESSION_ALIAS` unset for ordinary Claude sessions. Each process should normally use its generated ephemeral address. Set `PARLE_SESSION_ALIAS` only for a deliberately singleton named role because every new process with the same alias takes over that route and supersedes the previous session.
 
 ### Permissions

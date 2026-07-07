@@ -351,6 +351,7 @@ export function compactServerWrappedContent(content: string, preamble?: string, 
 
 export class ParleAgentClient {
   readonly cfg: ParleConfig;
+  readonly cwd: string;
   readonly fetchImpl: FetchLike;
   readonly env: Record<string, string | undefined>;
   readonly now: () => Date;
@@ -369,7 +370,8 @@ export class ParleAgentClient {
 
   constructor(options: ClientOptions = {}) {
     this.env = options.env || process.env;
-    this.cfg = resolveConfig(options.cwd, this.env);
+    this.cwd = options.cwd ?? process.cwd();
+    this.cfg = resolveConfig(this.cwd, this.env);
     this.fetchImpl = options.fetch || fetch;
     this.now = options.now || (() => new Date());
     this.randomUUID = options.randomUUID || randomUUID;
@@ -389,7 +391,7 @@ export class ParleAgentClient {
       },
       // agent_session_id is room-visible operational metadata (canonical classification tracked in parlehq/parle#435); session_credential is the credential and stays redacted.
       runtime: { ...this.runtime, sessionHandle: this.runtime.sessionHandle ? "<redacted>" : "" },
-      warnings: this.cfg.warnings,
+      warnings: [...this.cfg.warnings, ...(this.staleTokenHint() ? [this.staleTokenHint()!] : [])],
     };
   }
 
@@ -400,11 +402,31 @@ export class ParleAgentClient {
     // @parle-interpretation parlehq/parle#434
     // Connection-posture wording pending the core session lifecycle contract.
     const note = missing.length
-      ? "Set missing configuration in env, .env, or .parle/credentials."
+      ? "Set missing configuration in env, .env, or .parle/credentials (checked in that order; values load once at process start)."
       : this.runtime.bootstrapped
         ? "Parle configuration is present and this process holds a session."
         : "Parle configuration is present. Not yet connected in this process; a connect, read, or send call establishes the session.";
-    return { ok: missing.length === 0, missing, connected: this.runtime.bootstrapped, apiBase: this.cfg.apiBase.value, note };
+    const staleToken = this.staleTokenHint();
+    return { ok: missing.length === 0 && !staleToken, missing, connected: this.runtime.bootstrapped, apiBase: this.cfg.apiBase.value, note, ...(staleToken ? { warning: staleToken } : {}) };
+  }
+
+  // Config is resolved once at construction; a token rotated on disk afterwards
+  // cannot take effect until the host process restarts. Compare against the first
+  // disk source that defines the key (mirrors firstConfigValue precedence).
+  staleTokenHint(): string | undefined {
+    const current = this.cfg.agentToken?.value;
+    if (!current) return undefined;
+    for (const rel of [".env", join(".parle", "credentials")]) {
+      try {
+        const onDisk = readKeyValueFile(join(this.cwd, rel))["PARLE_ROOM_AGENT_TOKEN"];
+        if (onDisk === undefined || onDisk === "") continue;
+        if (onDisk === current) return undefined;
+        return `PARLE_ROOM_AGENT_TOKEN in ${rel} differs from the value this process loaded at startup (source: ${this.cfg.agentToken?.source}). The token was likely rotated. Restart the host process (agent session or MCP server) to reload configuration.`;
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
   }
 
   assertConfigured() {
@@ -449,7 +471,12 @@ export class ParleAgentClient {
       const msg = redactString(json?.error?.message || truncateText(text, 4096).text || response.statusText || `HTTP ${response.status}`);
       // @parle-interpretation parlehq/parle#431
       // Replace status-class retry inference once API errors expose canonical retryability.
-      throw new ParleApiError(`Parle API ${response.status}: ${msg}`, { status: response.status, code, retryable: response.status >= 500 || response.status === 429, details: json });
+      let message = `Parle API ${response.status}: ${msg}`;
+      if (response.status === 401) {
+        const hint = this.staleTokenHint();
+        if (hint) message += ` ${hint}`;
+      }
+      throw new ParleApiError(message, { status: response.status, code, retryable: response.status >= 500 || response.status === 429, details: json });
     }
     return json;
   }

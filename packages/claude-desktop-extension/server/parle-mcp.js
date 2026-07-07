@@ -31153,6 +31153,7 @@ function summarizeSendDelivery(details) {
 }
 var ParleAgentClient = class {
   cfg;
+  cwd;
   fetchImpl;
   env;
   now;
@@ -31170,7 +31171,8 @@ var ParleAgentClient = class {
   bootstrapGeneration = 0;
   constructor(options = {}) {
     this.env = options.env || process.env;
-    this.cfg = resolveConfig(options.cwd, this.env);
+    this.cwd = options.cwd ?? process.cwd();
+    this.cfg = resolveConfig(this.cwd, this.env);
     this.fetchImpl = options.fetch || fetch;
     this.now = options.now || (() => /* @__PURE__ */ new Date());
     this.randomUUID = options.randomUUID || randomUUID;
@@ -31189,7 +31191,7 @@ var ParleAgentClient = class {
       },
       // agent_session_id is room-visible operational metadata (canonical classification tracked in parlehq/parle#435); session_credential is the credential and stays redacted.
       runtime: { ...this.runtime, sessionHandle: this.runtime.sessionHandle ? "<redacted>" : "" },
-      warnings: this.cfg.warnings
+      warnings: [...this.cfg.warnings, ...this.staleTokenHint() ? [this.staleTokenHint()] : []]
     };
   }
   setup() {
@@ -31198,8 +31200,30 @@ var ParleAgentClient = class {
       missing.push("PARLE_ROOM_ID");
     if (!this.cfg.agentToken?.value)
       missing.push("PARLE_ROOM_AGENT_TOKEN");
-    const note = missing.length ? "Set missing configuration in env, .env, or .parle/credentials." : this.runtime.bootstrapped ? "Parle configuration is present and this process holds a session." : "Parle configuration is present. Not yet connected in this process; a connect, read, or send call establishes the session.";
-    return { ok: missing.length === 0, missing, connected: this.runtime.bootstrapped, apiBase: this.cfg.apiBase.value, note };
+    const note = missing.length ? "Set missing configuration in env, .env, or .parle/credentials (checked in that order; values load once at process start)." : this.runtime.bootstrapped ? "Parle configuration is present and this process holds a session." : "Parle configuration is present. Not yet connected in this process; a connect, read, or send call establishes the session.";
+    const staleToken = this.staleTokenHint();
+    return { ok: missing.length === 0 && !staleToken, missing, connected: this.runtime.bootstrapped, apiBase: this.cfg.apiBase.value, note, ...staleToken ? { warning: staleToken } : {} };
+  }
+  // Config is resolved once at construction; a token rotated on disk afterwards
+  // cannot take effect until the host process restarts. Compare against the first
+  // disk source that defines the key (mirrors firstConfigValue precedence).
+  staleTokenHint() {
+    const current = this.cfg.agentToken?.value;
+    if (!current)
+      return void 0;
+    for (const rel of [".env", join(".parle", "credentials")]) {
+      try {
+        const onDisk = readKeyValueFile(join(this.cwd, rel))["PARLE_ROOM_AGENT_TOKEN"];
+        if (onDisk === void 0 || onDisk === "")
+          continue;
+        if (onDisk === current)
+          return void 0;
+        return `PARLE_ROOM_AGENT_TOKEN in ${rel} differs from the value this process loaded at startup (source: ${this.cfg.agentToken?.source}). The token was likely rotated. Restart the host process (agent session or MCP server) to reload configuration.`;
+      } catch {
+        return void 0;
+      }
+    }
+    return void 0;
   }
   assertConfigured() {
     if (!this.cfg.roomId?.value)
@@ -31246,7 +31270,13 @@ var ParleAgentClient = class {
     if (!response.ok) {
       const code = json2?.error?.code;
       const msg = redactString(json2?.error?.message || truncateText(text, 4096).text || response.statusText || `HTTP ${response.status}`);
-      throw new ParleApiError(`Parle API ${response.status}: ${msg}`, { status: response.status, code, retryable: response.status >= 500 || response.status === 429, details: json2 });
+      let message = `Parle API ${response.status}: ${msg}`;
+      if (response.status === 401) {
+        const hint = this.staleTokenHint();
+        if (hint)
+          message += ` ${hint}`;
+      }
+      throw new ParleApiError(message, { status: response.status, code, retryable: response.status >= 500 || response.status === 429, details: json2 });
     }
     return json2;
   }
