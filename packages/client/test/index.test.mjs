@@ -159,6 +159,44 @@ test("client bootstraps, reads inbox, and sends with direct addressing", async (
   assert.equal(JSON.parse(sendReq.init.body).payload.turn, undefined);
 });
 
+test("bootstrap keeps the parle_ses_ credential intact and presents it at room entry", async () => {
+  const requests = [];
+  const client = new ParleAgentClient({
+    env: {
+      PARLE_ROOM_ID: "room-1",
+      PARLE_ROOM_AGENT_TOKEN: "parle_agt_secret",
+      PARLE_ALLOW_INSECURE_LOCAL: "1",
+    },
+    fetch: async (url, init = {}) => {
+      const u = String(url);
+      requests.push({ url: u, init });
+      if (u.endsWith("/v/agent/sessions")) return json({ agent_session_id: "as-1", session_credential: "parle_ses_" + String("live-cred"), session_handle: "s1", expires_at: "later" }, 201);
+      if (u.endsWith("/participants")) return json({ participant_id: "part-1" }, 201);
+      if (u.includes("/projection")) return json({ watermark: 0, messages: [] });
+      return json({});
+    },
+  });
+  await client.bootstrap();
+  const entry = requests.find((r) => r.url.endsWith("/participants"));
+  assert.equal(entry.init.headers["Parle-Agent-Session"], "parle_ses_live-cred");
+  assert.equal(JSON.stringify(client.status()).includes("live-cred"), false);
+});
+
+test("rawResponse requests still redact error text and details", async () => {
+  const client = new ParleAgentClient({
+    env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "parle_agt_secret", PARLE_ALLOW_INSECURE_LOCAL: "1" },
+    fetch: async () => json({ error: { code: "bad", message: "leaked parle_ses_oops in error" } }, 400),
+  });
+  await client.requestJson("/v/agent/sessions", { method: "POST", body: {}, rawResponse: true }).then(
+    () => assert.fail("expected rejection"),
+    (error) => {
+      assert.match(error.message, /Parle API 400/);
+      assert.equal(error.message.includes("parle_ses_oops"), false);
+      assert.equal(JSON.stringify(error.details).includes("parle_ses_oops"), false);
+    },
+  );
+});
+
 test("send omits delivery status when success has no moderation envelope", async () => {
   const client = new ParleAgentClient({
     env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "opaque-token" },

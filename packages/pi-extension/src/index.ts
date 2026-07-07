@@ -1,5 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 const EXTENSION_ID = "25-parle";
@@ -42,6 +43,8 @@ type ParleConfig = {
   roomHandle?: ConfigValue;
   agentToken?: ConfigValue;
   agentTokenId?: ConfigValue;
+  agentId?: ConfigValue;
+  sessionCookie?: ConfigValue;
   sessionAlias?: ConfigValue;
   watchEnabled: ConfigValue;
   wakeBase: ConfigValue;
@@ -90,6 +93,19 @@ type TruncatedText = {
   bytes: number;
   returnedBytes: number;
   truncated: boolean;
+};
+
+type ParleLoginParams = {
+  action?: "start" | "complete" | "mint-from-session";
+  email?: string;
+  code?: string;
+  roomId?: string;
+  roomHandle?: string;
+  agentId?: string;
+  agentHandle?: string;
+  writeCredentials?: boolean;
+  updateGitignore?: boolean;
+  reason?: string;
 };
 
 type ParleRequestParams = {
@@ -188,12 +204,14 @@ function resolveConfig(cwd: string): ParleConfig {
     roomHandle: pick("PARLE_ROOM_HANDLE", undefined),
     agentToken: pick("PARLE_ROOM_AGENT_TOKEN", undefined, true),
     agentTokenId: pick("PARLE_AGENT_TOKEN_ID", undefined),
+    agentId: pick("PARLE_AGENT_ID", undefined),
+    sessionCookie: pick("PARLE_SESSION_COOKIE", undefined, true),
     sessionAlias: pick("PARLE_SESSION_ALIAS", undefined),
     watchEnabled: pick("PARLE_WATCH_ENABLED", "1"),
     wakeBase: pick("PARLE_WAKE_BASE", undefined),
     warnings,
   };
-  for (const value of [cfg.apiBase, cfg.wakeBase, cfg.version, cfg.roomId, cfg.roomHandle, cfg.agentToken, cfg.agentTokenId, cfg.sessionAlias, cfg.watchEnabled]) {
+  for (const value of [cfg.apiBase, cfg.wakeBase, cfg.version, cfg.roomId, cfg.roomHandle, cfg.agentToken, cfg.agentTokenId, cfg.agentId, cfg.sessionCookie, cfg.sessionAlias, cfg.watchEnabled]) {
     if (value?.warning) cfg.warnings.push(value.warning);
   }
   // Process env is a startup snapshot; project .env is regenerated on rotation.
@@ -310,6 +328,295 @@ function mutationScope(method: string, pathOrUrl: string): string {
   } catch {
     return `${upper} ${pathOrUrl.split("?")[0]}`;
   }
+}
+
+function credentialsPath(cwd: string): string {
+  return join(cwd, ".parle", "credentials");
+}
+
+function credentialLine(key: string, value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return `${key}=${value}`;
+}
+
+function credentialKeys(): string[] {
+  return [
+    "PARLE_API_BASE",
+    "PARLE_WAKE_BASE",
+    "PARLE_VERSION",
+    "PARLE_PRINCIPAL_HANDLE",
+    "PARLE_AGENT_HANDLE",
+    "PARLE_ROOM_HANDLE",
+    "PARLE_ROOM_ID",
+    "PARLE_AGENT_ID",
+    "PARLE_AGENT_TOKEN_ID",
+    "PARLE_SESSION_COOKIE",
+    "PARLE_ROOM_AGENT_TOKEN",
+    "PARLE_WATCH_ENABLED",
+    "PARLE_SESSION_ALIAS",
+  ];
+}
+
+function ensureParleDirectory(cwd: string) {
+  const dir = join(cwd, ".parle");
+  if (existsSync(dir)) {
+    const stat = lstatSync(dir);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("Refusing to write .parle/credentials because .parle is not a regular directory.");
+  } else {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+  chmodSync(dir, 0o700);
+}
+
+function assertSafeCredentialPath(cwd: string) {
+  const path = credentialsPath(cwd);
+  if (!existsSync(path)) return;
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Refusing to write .parle/credentials because it is not a regular file.");
+}
+
+function credentialsTrackedByGit(cwd: string): boolean {
+  try {
+    const output = execFileSync("git", ["-C", cwd, "ls-files", ".parle/credentials"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    return output.split(/\r?\n/).includes(".parle/credentials");
+  } catch {
+    return false;
+  }
+}
+
+function ensureCredentialsIgnored(cwd: string): boolean {
+  const path = join(cwd, ".gitignore");
+  const entry = ".parle/credentials";
+  if (existsSync(path)) {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Refusing to update .gitignore because it is not a regular file.");
+  }
+  const text = existsSync(path) ? readFileSync(path, "utf8") : "";
+  if (text.split(/\r?\n/).includes(entry)) return false;
+  const prefix = text && !text.endsWith("\n") ? `${text}\n` : text;
+  writeFileSync(path, `${prefix}${entry}\n`);
+  return true;
+}
+
+function preflightCredentialSink(cwd: string, updateGitignore: boolean) {
+  ensureParleDirectory(cwd);
+  if (credentialsTrackedByGit(cwd)) {
+    throw new Error("Refusing to write .parle/credentials because it is tracked by git. Remove it from the index before running parle_login complete.");
+  }
+  assertSafeCredentialPath(cwd);
+  const probe = join(cwd, ".parle", ".credentials-write-test");
+  writeFileSync(probe, "ok\n", { mode: 0o600 });
+  chmodSync(probe, 0o600);
+  unlinkSync(probe);
+  if (updateGitignore) ensureCredentialsIgnored(cwd);
+}
+
+function writeCredentialFile(cwd: string, values: Record<string, string | undefined>) {
+  preflightCredentialSink(cwd, false);
+  const path = credentialsPath(cwd);
+  const existing = readKeyValueFile(path);
+  const merged: Record<string, string> = { ...existing };
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined || value === "") continue;
+    merged[key] = value;
+  }
+  const ordered = credentialKeys();
+  const lines: string[] = [];
+  for (const key of ordered) {
+    const line = credentialLine(key, merged[key]);
+    if (line) lines.push(line);
+  }
+  for (const key of Object.keys(merged).sort()) {
+    if (ordered.includes(key)) continue;
+    const line = credentialLine(key, merged[key]);
+    if (line) lines.push(line);
+  }
+  const tempPath = join(cwd, ".parle", `.credentials.${process.pid}.${Date.now()}.tmp`);
+  try {
+    writeFileSync(tempPath, `${lines.join("\n")}\n`, { mode: 0o600 });
+    chmodSync(tempPath, 0o600);
+    renameSync(tempPath, path);
+    chmodSync(path, 0o600);
+  } catch (error) {
+    try { if (existsSync(tempPath)) unlinkSync(tempPath); } catch {}
+    throw error;
+  }
+}
+
+function getSetCookieHeaders(headers: Headers): string[] {
+  const rawGetSetCookie = (headers as any).getSetCookie;
+  if (typeof rawGetSetCookie === "function") return rawGetSetCookie.call(headers);
+  const one = headers.get("set-cookie");
+  return one ? [one] : [];
+}
+
+function extractSessionCookie(headers: Headers): string | undefined {
+  for (const value of getSetCookieHeaders(headers)) {
+    const match = value.match(/(?:^|,\s*)(__Host-parle_session=[^;,\s]+)/);
+    if (match) return match[1];
+  }
+  return undefined;
+}
+
+function publicInventory(items: any[], idKey: string, handleKey: string) {
+  return items.map((item) => ({ [idKey]: item?.[idKey], [handleKey]: item?.[handleKey] })).filter((item) => item[idKey] || item[handleKey]);
+}
+
+function chooseInventoryItem(items: any[], idKey: string, handleKey: string, label: string, requestedId?: string, requestedHandle?: string): any | undefined {
+  if (requestedId && requestedHandle) {
+    const match = items.find((item) => item?.[idKey] === requestedId);
+    if (!match) throw new Error(`No ${label} matches ${idKey}=${requestedId}.`);
+    if (match?.[handleKey] !== requestedHandle) throw new Error(`${label} selection conflict: ${idKey}=${requestedId} has ${handleKey}=${match?.[handleKey] || "<unset>"}, not ${requestedHandle}.`);
+    return match;
+  }
+  if (requestedId) {
+    const match = items.find((item) => item?.[idKey] === requestedId);
+    if (!match) throw new Error(`No ${label} matches ${idKey}=${requestedId}.`);
+    return match;
+  }
+  if (requestedHandle) {
+    const matches = items.filter((item) => item?.[handleKey] === requestedHandle);
+    if (matches.length === 0) throw new Error(`No ${label} matches ${handleKey}=${requestedHandle}.`);
+    if (matches.length > 1) throw new Error(`Multiple ${label}s match ${handleKey}=${requestedHandle}; pass ${idKey} instead.`);
+    return matches[0];
+  }
+  return items.length === 1 ? items[0] : undefined;
+}
+
+async function humanJson(cfg: ParleConfig, path: string, cookie: string, options: { method?: string; body?: unknown; signal?: AbortSignal } = {}) {
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    "Parle-Version": cfg.version.value || DEFAULT_VERSION,
+    Cookie: cookie,
+  };
+  let body: string | undefined;
+  if (options.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify(options.body);
+  }
+  const response = await fetch(new URL(path, cfg.apiBase.value), { method: options.method || "GET", headers, body, signal: options.signal });
+  const text = await response.text();
+  const json = parseJsonMaybe(text);
+  if (!response.ok) {
+    const msg = redactString(json?.error?.message || truncateText(redactString(text), 4096).text || response.statusText);
+    const err: any = new Error(`Parle API ${response.status}: ${msg}`);
+    err.status = response.status;
+    throw err;
+  }
+  return json ?? {};
+}
+
+async function parleLogin(ctx: any, cfg: ParleConfig, params: ParleLoginParams, signal?: AbortSignal) {
+  assertEnabled(cfg);
+  assertSafeBase(cfg.apiBase.value);
+  const action = params.action || (params.code ? "complete" : "start");
+  const writeCredentials = params.writeCredentials !== false;
+  const updateGitignore = params.updateGitignore !== false;
+  const cwd = ctx.cwd || process.cwd();
+
+  if (action === "start") {
+    if (!params.email) throw new Error("parle_login start requires email.");
+    const response = await fetch(new URL("/v/auth/email/start", cfg.apiBase.value), {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json", "Parle-Version": cfg.version.value || DEFAULT_VERSION },
+      body: JSON.stringify({ email: params.email }),
+      signal,
+    });
+    const text = redactString(await response.text());
+    if (!response.ok) throw new Error(`Parle email login start failed ${response.status}: ${truncateText(text, 4096).text}`);
+    return {
+      status: "code_requested",
+      email: params.email,
+      next: "Call parle_login again with the same email and the code. The complete step will capture Set-Cookie and save local credentials without printing secrets.",
+    };
+  }
+
+  let sessionCookie = cfg.sessionCookie?.value;
+  if (action === "complete") {
+    if (!params.email) throw new Error("parle_login complete requires email.");
+    if (!params.code) throw new Error("parle_login complete requires code.");
+    if (!writeCredentials) throw new Error("parle_login complete refuses writeCredentials=false because it would consume a one-time code without durable credential recovery.");
+    preflightCredentialSink(cwd, updateGitignore);
+    const response = await fetch(new URL("/v/auth/email/complete", cfg.apiBase.value), {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json", "Parle-Version": cfg.version.value || DEFAULT_VERSION },
+      body: JSON.stringify({ email: params.email, code: params.code }),
+      signal,
+    });
+    const text = redactString(await response.text());
+    if (!response.ok) throw new Error(`Parle email login complete failed ${response.status}: ${truncateText(text, 4096).text}`);
+    sessionCookie = extractSessionCookie(response.headers);
+    if (!sessionCookie) throw new Error("Parle email login completed but no __Host-parle_session Set-Cookie header was present. Credential persistence cannot continue safely.");
+    if (writeCredentials) {
+      writeCredentialFile(cwd, {
+        PARLE_API_BASE: cfg.apiBase.value || DEFAULT_API_BASE,
+        PARLE_WAKE_BASE: cfg.wakeBase.value || undefined,
+        PARLE_VERSION: cfg.version.value || DEFAULT_VERSION,
+        PARLE_SESSION_COOKIE: sessionCookie,
+      });
+      if (updateGitignore) ensureCredentialsIgnored(cwd);
+    }
+  } else if (action === "mint-from-session") {
+    if (!writeCredentials) throw new Error("parle_login mint-from-session refuses writeCredentials=false because it would mint a plaintext token without durable credential recovery.");
+    preflightCredentialSink(cwd, updateGitignore);
+    if (!sessionCookie) throw new Error("parle_login mint-from-session requires PARLE_SESSION_COOKIE in env, .env, or .parle/credentials.");
+  } else {
+    throw new Error(`Unknown parle_login action: ${action}`);
+  }
+
+  const roomsBody = await humanJson(cfg, "/v/rooms", sessionCookie, { signal });
+  const agentsBody = await humanJson(cfg, "/v/agents", sessionCookie, { signal });
+  const rooms = Array.isArray(roomsBody?.rooms) ? roomsBody.rooms : Array.isArray(roomsBody) ? roomsBody : [];
+  const agents = Array.isArray(agentsBody?.agents) ? agentsBody.agents : Array.isArray(agentsBody) ? agentsBody : [];
+  const existingCredentials = readKeyValueFile(credentialsPath(cwd));
+  const roomId = params.roomId || (params.roomHandle ? undefined : cfg.roomId?.value);
+  const roomHandle = params.roomHandle || (params.roomId ? undefined : cfg.roomHandle?.value);
+  const agentId = params.agentId || (params.agentHandle ? undefined : cfg.agentId?.value || existingCredentials.PARLE_AGENT_ID);
+  const agentHandle = params.agentHandle || (params.agentId ? undefined : existingCredentials.PARLE_AGENT_HANDLE);
+  const room = chooseInventoryItem(rooms, "room_id", "room_handle", "room", roomId, roomHandle);
+  const agent = chooseInventoryItem(agents, "agent_id", "agent_handle", "agent", agentId, agentHandle);
+  if (!room || !agent) {
+    return {
+      status: "selection_required",
+      wroteSessionCookie: writeCredentials && action === "complete",
+      rooms: publicInventory(rooms, "room_id", "room_handle"),
+      agents: publicInventory(agents, "agent_id", "agent_handle"),
+      next: "Call parle_login with action:'mint-from-session' and either roomId or roomHandle plus either agentId or agentHandle. The session cookie has been saved if writeCredentials was enabled.",
+    };
+  }
+
+  const tokenBody = await humanJson(cfg, `/v/agents/${encodeURIComponent(agent.agent_id)}/tokens`, sessionCookie, {
+    method: "POST",
+    body: { room_id: room.room_id },
+    signal,
+  });
+  const token = tokenBody?.token;
+  if (!token) throw new Error("Parle token mint succeeded without returning a plaintext token; local credentials were not updated with an agent token.");
+  if (writeCredentials) {
+    writeCredentialFile(cwd, {
+      PARLE_API_BASE: cfg.apiBase.value || DEFAULT_API_BASE,
+      PARLE_WAKE_BASE: cfg.wakeBase.value || undefined,
+      PARLE_VERSION: cfg.version.value || DEFAULT_VERSION,
+      PARLE_AGENT_HANDLE: agent.agent_handle,
+      PARLE_ROOM_HANDLE: room.room_handle,
+      PARLE_ROOM_ID: room.room_id,
+      PARLE_AGENT_ID: agent.agent_id,
+      PARLE_AGENT_TOKEN_ID: tokenBody.agent_token_id,
+      PARLE_SESSION_COOKIE: sessionCookie,
+      PARLE_ROOM_AGENT_TOKEN: token,
+    });
+    if (updateGitignore) ensureCredentialsIgnored(cwd);
+  }
+  return {
+    status: "credentials_saved",
+    wroteCredentials: writeCredentials,
+    gitignoreUpdated: updateGitignore,
+    room: { room_id: room.room_id, room_handle: room.room_handle },
+    agent: { agent_id: agent.agent_id, agent_handle: agent.agent_handle },
+    agent_token_id: tokenBody.agent_token_id,
+    secrets: "redacted; PARLE_SESSION_COOKIE and PARLE_ROOM_AGENT_TOKEN were not returned in tool output",
+    next: "Run parle_status to bootstrap and verify this Pi session.",
+  };
 }
 
 async function parleRequest(cfg: ParleConfig, params: ParleRequestParams, signal?: AbortSignal, runtimeSession?: RuntimeState) {
@@ -929,6 +1236,8 @@ function statusDetails(ctx: any) {
     roomHandle: redactedValue(cfg.roomHandle),
     agentToken: redactedValue(cfg.agentToken),
     agentTokenId: redactedValue(cfg.agentTokenId),
+    agentId: redactedValue(cfg.agentId),
+    sessionCookie: redactedValue(cfg.sessionCookie),
     sessionAlias: redactedValue(cfg.sessionAlias),
     watchEnabled: redactedValue(cfg.watchEnabled),
     warnings: Array.from(new Set(cfg.warnings)),
@@ -1068,6 +1377,7 @@ export default function parleExtension(pi: any) {
           runtime.lastError = error instanceof Error ? error.message : String(error);
         }
       }
+      startWatcher(pi, ctx, resolveConfig(ctx.cwd || process.cwd()));
       setStatus(ctx, cfg);
       return formatResult(statusDetails(ctx));
     },
@@ -1093,7 +1403,7 @@ export default function parleExtension(pi: any) {
   pi.registerTool({
     name: "parle_setup",
     label: "Parle Setup",
-    description: "Diagnose Parle config and return setup guidance. V1 does not write credentials automatically.",
+    description: "Diagnose Parle config and return setup guidance. Use parle_login for email-code login and local credential bootstrap.",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _update, ctx) {
       lastCtx = ctx;
@@ -1106,8 +1416,33 @@ export default function parleExtension(pi: any) {
         missing,
         howPeersReachYou: details.runtime?.sessionAddress ? `Peers can direct responsive messages to ${details.runtime.sessionAddress}. Share this address when you want this exact session to be reachable.` : undefined,
         peerDiscovery: "Peer addresses are learned from message author blocks on readable room messages. Agents cannot list the full peer roster unless a room-specific API grants that separately.",
-        next: missing.length ? "Run parle_guidance for live setup instructions. Set missing values in the environment, .env, or .parle/credentials." : "Config is sufficient for lazy runtime bootstrap.",
+        next: missing.length ? "Use parle_login to request an email code, complete login, capture the session cookie, mint a room-bound agent token, and save .parle/credentials." : "Config is sufficient for lazy runtime bootstrap.",
       });
+    },
+  });
+
+  pi.registerTool({
+    name: "parle_login",
+    label: "Parle Login",
+    description: "First-class Parle email login and local credential bootstrap. Start sends a code. Complete captures Set-Cookie, lists owned rooms and agents, mints a room-bound agent token, writes .parle/credentials with 0600 permissions, and optionally gitignores that file. Secrets are never returned in tool output.",
+    parameters: Type.Object({
+      action: Type.Optional(Type.Unsafe({ type: "string", enum: ["start", "complete", "mint-from-session"] })),
+      email: Type.Optional(Type.String()),
+      code: Type.Optional(Type.String()),
+      roomId: Type.Optional(Type.String()),
+      roomHandle: Type.Optional(Type.String()),
+      agentId: Type.Optional(Type.String()),
+      agentHandle: Type.Optional(Type.String()),
+      writeCredentials: Type.Optional(Type.Boolean()),
+      updateGitignore: Type.Optional(Type.Boolean()),
+      reason: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params: ParleLoginParams, signal, _update, ctx) {
+      lastCtx = ctx;
+      const cfg = resolveConfig(ctx.cwd || process.cwd());
+      const details = await parleLogin(ctx, cfg, params, signal);
+      startWatcher(pi, ctx, resolveConfig(ctx.cwd || process.cwd()));
+      return formatResult(details);
     },
   });
 

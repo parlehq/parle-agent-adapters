@@ -31265,18 +31265,20 @@ var ParleAgentClient = class {
       throw error51;
     }
     this.runtime.lastHttpStatus = response.status;
-    const text = redactString(await response.text());
-    const json2 = parseJsonMaybe(text);
+    const rawText = await response.text();
+    const text = redactString(rawText);
+    const json2 = parseJsonMaybe(options.rawResponse ? rawText : text);
     if (!response.ok) {
-      const code = json2?.error?.code;
-      const msg = redactString(json2?.error?.message || truncateText(text, 4096).text || response.statusText || `HTTP ${response.status}`);
+      const redactedJson = options.rawResponse ? parseJsonMaybe(text) : json2;
+      const code = redactedJson?.error?.code;
+      const msg = redactString(redactedJson?.error?.message || truncateText(text, 4096).text || response.statusText || `HTTP ${response.status}`);
       let message = `Parle API ${response.status}: ${msg}`;
       if (response.status === 401) {
         const hint = this.staleTokenHint();
         if (hint)
           message += ` ${hint}`;
       }
-      throw new ParleApiError(message, { status: response.status, code, retryable: response.status >= 500 || response.status === 429, details: json2 });
+      throw new ParleApiError(message, { status: response.status, code, retryable: response.status >= 500 || response.status === 429, details: redactedJson });
     }
     return json2;
   }
@@ -31286,7 +31288,7 @@ var ParleAgentClient = class {
     const body = {};
     if (this.cfg.sessionAlias?.value)
       body.alias = this.cfg.sessionAlias.value;
-    const session = await this.requestJson("/v/agent/sessions", { method: "POST", body, signal });
+    const session = await this.requestJson("/v/agent/sessions", { method: "POST", body, signal, rawResponse: true });
     this.runtime.sessionHandle = String(session.session_credential || "");
     this.runtime.sessionAddress = typeof session.address === "string" ? session.address : null;
     this.runtime.agentSessionId = String(session.agent_session_id || "");

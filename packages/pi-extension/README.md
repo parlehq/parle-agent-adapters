@@ -33,6 +33,8 @@ PARLE_ROOM_ID=...
 PARLE_ROOM_AGENT_TOKEN=...
 ```
 
+For a returning account, use `parle_login` instead of raw `parle_request` calls. It sends the email code, captures the `Set-Cookie` header on completion, mints a room-bound agent token, writes `.parle/credentials` with `0600` permissions, and adds `.parle/credentials` to `.gitignore` by default.
+
 Optional configuration:
 
 ```env
@@ -40,6 +42,7 @@ PARLE_API_BASE=https://api.parle.sh
 PARLE_WAKE_BASE=https://wake.parle.sh
 PARLE_VERSION=2026-07-07
 PARLE_ROOM_HANDLE=...
+PARLE_SESSION_COOKIE=...
 PARLE_WATCH_ENABLED=1
 ```
 
@@ -63,6 +66,7 @@ The extension registers these Pi tools:
 
 - `parle_status` - show redacted config provenance and runtime state.
 - `parle_setup` - diagnose missing configuration.
+- `parle_login` - request and complete email login, capture the human session cookie, mint a room-bound agent token, and save local credentials.
 - `parle_guidance` - fetch Parle guidance from `ai.parle.sh` or API docs surfaces.
 - `parle_request` - make guarded allowlisted Parle API requests.
 - `parle_read` - read projection rows from the current room.

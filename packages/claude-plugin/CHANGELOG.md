@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2 (2026-07-07)
+
+Session credential bootstrap fix plus bundled Pi login and watcher refresh.
+
+- Agent client session bootstrap now parses the raw create-session body only for the secret `session_credential` response so `Parle-Agent-Session` receives the real `parle_ses_` credential. Surfaced errors and status output remain redacted.
+- Pi extension adds `parle_login` for email-code login, session-cookie capture, local `.parle/credentials` persistence, and room-bound token minting with fail-closed local secret-sink checks.
+- Pi extension starts the responsive watcher after late lazy bootstrap or login so sessions that acquire credentials after startup become reachable without a restart.
+
 ## 0.3.1 (2026-07-07)
 
 Stale-credential diagnostics (bundled `@parlehq/agent-client` refresh). Configuration is resolved once at MCP server start with precedence process env > .env > .parle/credentials; a token rotated on disk afterwards cannot take effect until the host process restarts. Previously that failure surfaced as a bare `Parle API 401` with no remediation path.

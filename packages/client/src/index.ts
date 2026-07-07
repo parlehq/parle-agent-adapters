@@ -68,6 +68,11 @@ export type RequestOptions = {
   session?: boolean;
   signal?: AbortSignal;
   timeoutMs?: number;
+  // Parse the raw body instead of the redacted text. Only for responses whose
+  // secret fields the client must keep (session bootstrap: session_credential
+  // is a parle_ses_ token that redactString would destroy). Never surface a
+  // rawResponse payload; error paths stay redacted regardless.
+  rawResponse?: boolean;
 };
 
 export type ReadParams = {
@@ -464,11 +469,13 @@ export class ParleAgentClient {
       throw error;
     }
     this.runtime.lastHttpStatus = response.status;
-    const text = redactString(await response.text());
-    const json = parseJsonMaybe(text);
+    const rawText = await response.text();
+    const text = redactString(rawText);
+    const json = parseJsonMaybe(options.rawResponse ? rawText : text);
     if (!response.ok) {
-      const code = json?.error?.code;
-      const msg = redactString(json?.error?.message || truncateText(text, 4096).text || response.statusText || `HTTP ${response.status}`);
+      const redactedJson = options.rawResponse ? parseJsonMaybe(text) : json;
+      const code = redactedJson?.error?.code;
+      const msg = redactString(redactedJson?.error?.message || truncateText(text, 4096).text || response.statusText || `HTTP ${response.status}`);
       // @parle-interpretation parlehq/parle#431
       // Replace status-class retry inference once API errors expose canonical retryability.
       let message = `Parle API ${response.status}: ${msg}`;
@@ -476,7 +483,7 @@ export class ParleAgentClient {
         const hint = this.staleTokenHint();
         if (hint) message += ` ${hint}`;
       }
-      throw new ParleApiError(message, { status: response.status, code, retryable: response.status >= 500 || response.status === 429, details: json });
+      throw new ParleApiError(message, { status: response.status, code, retryable: response.status >= 500 || response.status === 429, details: redactedJson });
     }
     return json;
   }
@@ -486,7 +493,10 @@ export class ParleAgentClient {
     const previousCursor = this.runtime.cursor;
     const body: Record<string, string> = {};
     if (this.cfg.sessionAlias?.value) body.alias = this.cfg.sessionAlias.value;
-    const session = await this.requestJson("/v/agent/sessions", { method: "POST", body, signal });
+    // rawResponse: session_credential is a parle_ses_ secret; the default
+    // redacted parse would replace it with <redacted-token> and every
+    // subsequent Parle-Agent-Session presentation would 401.
+    const session = await this.requestJson("/v/agent/sessions", { method: "POST", body, signal, rawResponse: true });
     this.runtime.sessionHandle = String(session.session_credential || "");
     this.runtime.sessionAddress = typeof session.address === "string" ? session.address : null;
     this.runtime.agentSessionId = String(session.agent_session_id || "");

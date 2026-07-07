@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -47,7 +47,7 @@ function tempProject(env = "") {
 }
 
 test("status reads room and token from project .env and redacts token", async () => {
-  const cwd = tempProject("PARLE_ROOM_ID=room-1\nPARLE_ROOM_AGENT_TOKEN=token-1\n");
+  const cwd = tempProject("PARLE_ROOM_ID=room-1\nPARLE_ROOM_AGENT_TOKEN=token-1\nPARLE_WATCH_ENABLED=0\n");
   globalThis.fetch = async () => { throw new Error("offline test"); };
   const harness = installHarness(cwd);
   const status = await harness.call("parle_status");
@@ -69,7 +69,7 @@ test("watcher bootstrap failure records status instead of escaping", async () =>
 });
 
 test("status bootstraps and redacts session handle", async () => {
-  const cwd = tempProject("PARLE_ROOM_ID=room-1\nPARLE_ROOM_AGENT_TOKEN=token-1\n");
+  const cwd = tempProject("PARLE_ROOM_ID=room-1\nPARLE_ROOM_AGENT_TOKEN=token-1\nPARLE_WATCH_ENABLED=0\n");
   globalThis.fetch = async (url) => {
     const u = String(url);
     if (u.endsWith("/v/agent/sessions")) return new Response(JSON.stringify({ agent_session_id: "as-1", session_credential: "parle_ses_raw-session", session_handle: "raw-session", expires_at: "2026-07-04T00:00:00Z", address: "@p.a.raw-session" }), { status: 201 });
@@ -81,6 +81,29 @@ test("status bootstraps and redacts session handle", async () => {
   const status = await harness.call("parle_status");
   assert.equal(status.details.runtime.sessionHandle, "<redacted>");
   assert.equal(status.details.runtime.sessionAddress, "@p.a.raw-session");
+});
+
+test("status starts watcher after late lazy bootstrap", async () => {
+  const cwd = tempProject("PARLE_ROOM_ID=room-1\nPARLE_ROOM_AGENT_TOKEN=token-1\n");
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v/agent/sessions")) return new Response(JSON.stringify({ agent_session_id: "as-late", session_credential: "parle_ses_late-session", expires_at: "2026-07-04T00:00:00Z", address: "@p.a.late-session" }), { status: 201 });
+    if (u.endsWith("/participants")) return new Response(JSON.stringify({ participant_id: "p-late", room_id: "room-1", agent_session_id: "as-late" }), { status: 201 });
+    if (u.includes("/projection")) return new Response(JSON.stringify({ watermark: 7, messages: [] }), { status: 200 });
+    if (u.includes("/responsive-delivery")) return new Response(JSON.stringify({ delivery: { last_acked_seq: 7 }, messages: [] }), { status: 200 });
+    if (u.endsWith("/v/agent/wake")) return new Response(": keepalive\n\n", { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    throw new Error("unexpected " + u);
+  };
+  const harness = installHarness(cwd);
+
+  const status = await harness.call("parle_status");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const state = __testing.runtimeState();
+
+  assert.equal(status.details.runtime.sessionAddress, "@p.a.late-session");
+  assert.equal(state.watcherStarted, true);
+  assert.notEqual(state.watcherState, "off");
+  __testing.resetRuntime();
 });
 
 test("mutating request requires exact confirmation scope", async () => {
@@ -95,8 +118,219 @@ test("mutating request requires exact confirmation scope", async () => {
   assert.equal(ok.details.ok, true);
 });
 
+test("parle_login starts email login without requiring raw request plumbing", async () => {
+  const cwd = tempProject();
+  let startBody;
+  globalThis.fetch = async (url, init = {}) => {
+    assert.equal(String(url), "https://api.parle.sh/v/auth/email/start");
+    startBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({ status: "if_account_exists_code_sent" }), { status: 202 });
+  };
+  const harness = installHarness(cwd);
+
+  const result = await harness.call("parle_login", { email: "user@example.test" });
+
+  assert.deepEqual(startBody, { email: "user@example.test" });
+  assert.equal(result.details.status, "code_requested");
+  assert.match(result.details.next, /code/);
+});
+
+test("parle_login complete captures Set-Cookie, mints token, saves credentials, and redacts secrets", async () => {
+  const cwd = tempProject();
+  const seen = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    seen.push({ url: u, init });
+    if (u.endsWith("/v/auth/email/complete")) {
+      assert.deepEqual(JSON.parse(init.body), { email: "user@example.test", code: "123456" });
+      return new Response(JSON.stringify({ status: "logged_in", session_cookie: "__Host-parle_session" }), {
+        status: 201,
+        headers: { "Set-Cookie": "__Host-parle_session=parle_ses_cookie-secret; Path=/; HttpOnly; Secure; SameSite=Lax" },
+      });
+    }
+    if (u.endsWith("/v/rooms")) {
+      assert.equal(init.headers.Cookie, "__Host-parle_session=parle_ses_cookie-secret");
+      return new Response(JSON.stringify({ rooms: [{ room_id: "room-1", room_handle: "room-one" }] }), { status: 200 });
+    }
+    if (u.endsWith("/v/agents")) {
+      assert.equal(init.headers.Cookie, "__Host-parle_session=parle_ses_cookie-secret");
+      return new Response(JSON.stringify({ agents: [{ agent_id: "agent-1", agent_handle: "pi" }] }), { status: 200 });
+    }
+    if (u.endsWith("/v/agents/agent-1/tokens")) {
+      assert.equal(init.headers.Cookie, "__Host-parle_session=parle_ses_cookie-secret");
+      assert.deepEqual(JSON.parse(init.body), { room_id: "room-1" });
+      return new Response(JSON.stringify({ agent_token_id: "tok-1", agent_id: "agent-1", room_id: "room-1", token: "parle_agt_plain-secret" }), { status: 201 });
+    }
+    throw new Error("unexpected " + u);
+  };
+  const harness = installHarness(cwd);
+
+  const result = await harness.call("parle_login", { action: "complete", email: "user@example.test", code: "123456" });
+
+  assert.equal(result.details.status, "credentials_saved");
+  assert.equal(JSON.stringify(result.details).includes("parle_ses_cookie-secret"), false);
+  assert.equal(JSON.stringify(result.details).includes("parle_agt_plain-secret"), false);
+  const credentials = readFileSync(join(cwd, ".parle", "credentials"), "utf8");
+  assert.match(credentials, /^PARLE_SESSION_COOKIE=__Host-parle_session=parle_ses_cookie-secret$/m);
+  assert.match(credentials, /^PARLE_ROOM_AGENT_TOKEN=parle_agt_plain-secret$/m);
+  assert.match(credentials, /^PARLE_ROOM_ID=room-1$/m);
+  assert.match(credentials, /^PARLE_AGENT_TOKEN_ID=tok-1$/m);
+  assert.equal(statSync(join(cwd, ".parle", "credentials")).mode & 0o777, 0o600);
+  assert.match(readFileSync(join(cwd, ".gitignore"), "utf8"), /^\.parle\/credentials$/m);
+
+  const status = await harness.call("parle_status");
+  assert.equal(status.details.sessionCookie.value, "<redacted>");
+  assert.equal(status.details.agentToken.value, "<redacted>");
+  assert.equal(seen.some((request) => request.url.endsWith("/v/agents/agent-1/tokens")), true);
+});
+
+test("parle_login preserves session cookie when room or agent selection is ambiguous", async () => {
+  const cwd = tempProject();
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v/auth/email/complete")) {
+      return new Response(JSON.stringify({ status: "logged_in" }), {
+        status: 201,
+        headers: { "Set-Cookie": "__Host-parle_session=parle_ses_saved; Path=/; HttpOnly; Secure" },
+      });
+    }
+    if (u.endsWith("/v/rooms")) return new Response(JSON.stringify({ rooms: [{ room_id: "room-1", room_handle: "one" }, { room_id: "room-2", room_handle: "two" }] }), { status: 200 });
+    if (u.endsWith("/v/agents")) return new Response(JSON.stringify({ agents: [{ agent_id: "agent-1", agent_handle: "a" }, { agent_id: "agent-2", agent_handle: "b" }] }), { status: 200 });
+    throw new Error("unexpected " + u);
+  };
+  const harness = installHarness(cwd);
+
+  const result = await harness.call("parle_login", { action: "complete", email: "user@example.test", code: "123456" });
+
+  assert.equal(result.details.status, "selection_required");
+  assert.equal(result.details.wroteSessionCookie, true);
+  assert.equal(result.details.rooms.length, 2);
+  assert.equal(result.details.agents.length, 2);
+  const credentials = readFileSync(join(cwd, ".parle", "credentials"), "utf8");
+  assert.match(credentials, /^PARLE_SESSION_COOKIE=__Host-parle_session=parle_ses_saved$/m);
+  assert.equal(credentials.includes("PARLE_ROOM_AGENT_TOKEN="), false);
+});
+
+test("parle_login complete refuses to consume a code when credentials will not be saved", async () => {
+  const cwd = tempProject();
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    return new Response("{}", { status: 201 });
+  };
+  const harness = installHarness(cwd);
+
+  await assert.rejects(
+    harness.call("parle_login", { action: "complete", email: "user@example.test", code: "123456", writeCredentials: false }),
+    /consume a one-time code/,
+  );
+  assert.equal(called, false);
+  assert.equal(existsSync(join(cwd, ".parle", "credentials")), false);
+});
+
+test("parle_login preflight refuses a git-tracked credential sink before consuming code", async () => {
+  const cwd = tempProject();
+  writeFileSync(join(cwd, ".gitignore"), "");
+  await import("node:child_process").then(({ execFileSync }) => {
+    execFileSync("git", ["init"], { cwd, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.test"], { cwd, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd, stdio: "ignore" });
+  });
+  writeFileSync(join(cwd, ".parle-tracked-placeholder"), "x\n");
+  mkdirSync(join(cwd, ".parle"), { recursive: true });
+  writeFileSync(join(cwd, ".parle", "credentials"), "PARLE_VERSION=2026-07-07\n");
+  await import("node:child_process").then(({ execFileSync }) => execFileSync("git", ["add", ".parle/credentials"], { cwd, stdio: "ignore" }));
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    return new Response("{}", { status: 201 });
+  };
+  const harness = installHarness(cwd);
+
+  await assert.rejects(
+    harness.call("parle_login", { action: "complete", email: "user@example.test", code: "123456" }),
+    /tracked by git/,
+  );
+  assert.equal(called, false);
+});
+
+test("parle_login fails closed on conflicting or duplicate selection", async () => {
+  const cwd = tempProject("PARLE_SESSION_COOKIE=__Host-parle_session=parle_ses_existing\nPARLE_ROOM_ID=room-1\nPARLE_AGENT_ID=agent-1\n");
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v/rooms")) return new Response(JSON.stringify({ rooms: [{ room_id: "room-1", room_handle: "one" }, { room_id: "room-2", room_handle: "two" }] }), { status: 200 });
+    if (u.endsWith("/v/agents")) return new Response(JSON.stringify({ agents: [{ agent_id: "agent-1", agent_handle: "dup" }, { agent_id: "agent-2", agent_handle: "dup" }] }), { status: 200 });
+    throw new Error("unexpected " + u);
+  };
+  const harness = installHarness(cwd);
+
+  await assert.rejects(
+    harness.call("parle_login", { action: "mint-from-session", roomId: "room-1", roomHandle: "two", agentId: "agent-1" }),
+    /selection conflict/,
+  );
+  await assert.rejects(
+    harness.call("parle_login", { action: "mint-from-session", roomHandle: "one", agentHandle: "dup" }),
+    /Multiple agents match/,
+  );
+});
+
+test("parle_login mint-from-session refuses to mint when credentials will not be saved", async () => {
+  const cwd = tempProject("PARLE_SESSION_COOKIE=__Host-parle_session=parle_ses_existing\n");
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    return new Response("{}", { status: 200 });
+  };
+  const harness = installHarness(cwd);
+
+  await assert.rejects(
+    harness.call("parle_login", { action: "mint-from-session", writeCredentials: false, roomId: "room-1", agentId: "agent-1" }),
+    /mint a plaintext token/,
+  );
+  assert.equal(called, false);
+});
+
+test("parle_login refuses symlink credential sinks before consuming code", async () => {
+  const cwd = tempProject();
+  mkdirSync(join(cwd, ".parle"), { recursive: true });
+  writeFileSync(join(cwd, "elsewhere"), "original\n");
+  symlinkSync(join(cwd, "elsewhere"), join(cwd, ".parle", "credentials"));
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    return new Response("{}", { status: 201 });
+  };
+  const harness = installHarness(cwd);
+
+  await assert.rejects(
+    harness.call("parle_login", { action: "complete", email: "user@example.test", code: "123456" }),
+    /not a regular file/,
+  );
+  assert.equal(called, false);
+  assert.equal(readFileSync(join(cwd, "elsewhere"), "utf8"), "original\n");
+});
+
+test("parle_login refuses symlink gitignore before consuming code", async () => {
+  const cwd = tempProject();
+  writeFileSync(join(cwd, "elsewhere-gitignore"), "original\n");
+  symlinkSync(join(cwd, "elsewhere-gitignore"), join(cwd, ".gitignore"));
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    return new Response("{}", { status: 201 });
+  };
+  const harness = installHarness(cwd);
+
+  await assert.rejects(
+    harness.call("parle_login", { action: "complete", email: "user@example.test", code: "123456" }),
+    /update \.gitignore/,
+  );
+  assert.equal(called, false);
+  assert.equal(readFileSync(join(cwd, "elsewhere-gitignore"), "utf8"), "original\n");
+});
+
 function installSendHarness(fetchImpl) {
-  const cwd = tempProject("PARLE_ROOM_ID=room-send\nPARLE_ROOM_AGENT_TOKEN=token-send\n");
+  const cwd = tempProject("PARLE_ROOM_ID=room-send\nPARLE_ROOM_AGENT_TOKEN=token-send\nPARLE_WATCH_ENABLED=0\n");
   globalThis.fetch = fetchImpl;
   return installHarness(cwd);
 }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2 (2026-07-07)
+
+Session credential bootstrap fix from the bundled MCP server refresh.
+
+- Agent client session bootstrap preserves the raw `session_credential` only for the create-session response so room entry presents the real `parle_ses_` credential.
+- Surfaced errors, status output, and tool results remain redacted.
+
 ## 0.3.1 (2026-07-07)
 
 Stale-credential diagnostics (bundled `@parlehq/agent-client` refresh):
