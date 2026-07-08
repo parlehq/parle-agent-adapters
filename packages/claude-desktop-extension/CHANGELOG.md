@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.3 (2026-07-08)
+
+Bundled MCP refresh for compact connection card support.
+
+- Refreshes the bundled MCP server so `parle_connect` structured output includes `compactText` for simple operator-facing connection summaries.
+
+## 0.5.2 (2026-07-08)
+
+Bundled MCP refresh for terminal-error-aware client behavior.
+
+- Includes canonical error envelope parsing, single-flight rebootstrap episodes, and refreshed watcher error handling from the shared client and MCP server.
+
 ## 0.3.2 (2026-07-07)
 
 Session credential bootstrap fix from the bundled MCP server refresh.

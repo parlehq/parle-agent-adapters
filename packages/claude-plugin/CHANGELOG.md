@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.5.5 (2026-07-08)
+
+Compact connection card for Parle connect UX.
+
+- `parle_connect` now includes `compactText` in structured output so adapters can show a simple operator-facing card without losing full connection details for watcher setup.
+- The Claude skill now renders the compact card after watcher startup is confirmed and keeps UUIDs, cursor, expiry, backlog, config provenance, and credentials out of the default response.
+
+## 0.5.4 (2026-07-08)
+
 Terminal-error-aware client hard cut.
 
 - The shared client now parses Parle's canonical error envelope fields (`code`, `action`, `scope`, `retryable`, `retry_after_ms`) and exposes them on `ParleApiError` and MCP tool errors.
