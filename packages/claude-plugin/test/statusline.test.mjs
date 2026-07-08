@@ -140,6 +140,37 @@ test("full mode lists all addresses for multiple live sessions, labeled as cwd s
   }
 });
 
+test("fresh unread counts display; stale counts are suppressed in compact and labeled in full", () => {
+  const fresh = scaffold({ [`${process.pid}.json`]: liveSnapshot(process.pid, { unreadCount: 2, unreadAsOf: new Date().toISOString() }) });
+  const stale = scaffold({ [`${process.pid}.json`]: liveSnapshot(process.pid, { unreadCount: 2, unreadAsOf: new Date(Date.now() - 420_000).toISOString() }) });
+  const zero = scaffold({ [`${process.pid}.json`]: liveSnapshot(process.pid, { unreadCount: 0, unreadAsOf: new Date().toISOString() }) });
+  try {
+    assert.equal(run(fresh), "parle ✓ @gilman.galexc.abc123 · 2 unread");
+    assert.match(run(fresh, ["--full"]), / · 2 unread$/);
+    assert.equal(run(stale), "parle ✓ @gilman.galexc.abc123");
+    assert.match(run(stale, ["--full"]), / · unread stale 7m$/);
+    assert.equal(run(zero), "parle ✓ @gilman.galexc.abc123");
+  } finally {
+    for (const cwd of [fresh, stale, zero]) rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("multi-session unread is an indicator, never a summed number", () => {
+  const cwd = scaffold({
+    [`${process.pid}.json`]: liveSnapshot(process.pid, { unreadCount: 2, unreadAsOf: new Date().toISOString() }),
+    [`${process.ppid}.json`]: liveSnapshot(process.ppid, { sessionAddress: "@gilman.galexc.other", unreadCount: 1, unreadAsOf: new Date().toISOString() }),
+  });
+  try {
+    assert.equal(run(cwd), "parle ✓ 2 sessions · unread");
+    const full = run(cwd, ["--full"]);
+    assert.match(full, /@gilman\.galexc\.abc123 \(2 unread\)/);
+    assert.match(full, /@gilman\.galexc\.other \(1 unread\)/);
+    assert.doesNotMatch(full, /3 unread/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("unconfigured cwd prints nothing", () => {
   const cwd = mkdtempSync(join(tmpdir(), "parle-statusline-empty-"));
   try {

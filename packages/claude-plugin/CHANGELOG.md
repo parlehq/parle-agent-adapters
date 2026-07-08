@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0 (2026-07-07)
+
+Unread count in the statusline: inbound attention surfaced without draining (bundled artifact refresh; no MCP tool contract change).
+
+- The MCP server now observes the self-excluding inbound surface past its read cursor and publishes count-only fields (`unreadCount`, `unreadAsOf`) into the runtime snapshot. Message content never leaves the server process; the snapshot stays credential-free and schemaVersion 1 (additive fields).
+- Observation is a bounded background poll: lazy (starts on bootstrap success), jittered, one request in flight, unref'd (never holds the process open), dies outside `ready` state and revives on rebootstrap. `PARLE_UNREAD_POLL_INTERVAL_SECONDS` configures it (default 60, floor 15, cap 3600, 0 disables).
+- Cursor safety, verified live against the production API: counting uses `since_seq=<cursor>&wait=0` and never advances the cursor; repeated observations are idempotent; a drain that lands while an observation is in flight discards that observation, so a just-read count can never resurrect. Reads that advance the cursor synchronously republish the remaining count (zero after a full drain).
+- Failure isolation: observation errors never touch session state; the count goes stale and ages out of display. A steady zero produces no file rewrites.
+- Statusline: compact shows `parle ✓ @addr · 2 unread` only while the observation is fresh (under 180s); zero or stale shows nothing. Multi-session compact shows an `· unread` indicator, never a summed number (per-session self-excluding surfaces double-count room-wide rows); `--full` lists per-session counts and labels stale observations explicitly.
+
 ## 0.4.1 (2026-07-07)
 
 Statusline setup skill and full-width display mode (no MCP tool contract change).

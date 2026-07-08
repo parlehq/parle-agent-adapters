@@ -27,6 +27,10 @@ The stdio entrypoint constructs a `ParleAgentClient` with runtime publishing ena
 
 The client publishes a display-safe per-process snapshot to `<cwd>/.parle/runtime/<pid>.json` (0700 directory, 0600 file, atomic rename; never a credential) for host UX surfaces such as statuslines. Snapshots self-invalidate via expiry plus pid liveness; provably stale sibling files are pruned at startup; SIGINT/SIGTERM end the session best-effort and remove the file.
 
+## Unread observation
+
+Runtime-publishing clients also observe the self-excluding inbound surface past the process cursor on a bounded background poll (`PARLE_UNREAD_POLL_INTERVAL_SECONDS`, default 60, 0 disables) and publish `unreadCount`/`unreadAsOf` into the snapshot. Counting never advances the cursor (verified against the live API), a concurrent drain invalidates an in-flight observation, cursor-advancing reads synchronously republish the remaining count, observation failures never touch session state, and a steady zero writes nothing. Only counts and timestamps are published, never content.
+
 `parle_read` and `parle_inbox` may expose short `waitSeconds` values for explicit one-shot waits. They must not be documented or implemented as background watcher loops. Responsive delivery watchers use `/v/agent/wake` SSE and then drain `responsive-delivery?wait=0`.
 
 This package owns:

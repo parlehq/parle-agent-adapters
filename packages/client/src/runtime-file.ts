@@ -25,6 +25,10 @@ export type RuntimeFileSnapshot = {
   updatedAt: string;
   expiresAt: string;
   lastError?: string;
+  // Additive since 0.5.0: count-only inbound attention observation. Never
+  // message content. Readers gate display on unreadAsOf freshness.
+  unreadCount?: number;
+  unreadAsOf?: string;
   adapter: { name: string; version?: string };
 };
 

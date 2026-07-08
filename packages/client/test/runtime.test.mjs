@@ -184,6 +184,159 @@ test("isLiveRuntimeSnapshot gates on schema, state, expiry, and pid liveness", (
   assert.equal(isLiveRuntimeSnapshot(snapshotFor(deadPid()), now), false);
 });
 
+function unreadFetch(counters = {}, rows = () => []) {
+  const happy = happyFetch(counters);
+  return async (url, init) => {
+    const u = String(url);
+    if (u.includes("/inbound?")) {
+      counters.inbound = (counters.inbound || 0) + 1;
+      counters.lastInboundUrl = u;
+      return json({ watermark: 7, messages: rows() });
+    }
+    return happy(url, init);
+  };
+}
+
+test("observeUnread counts without advancing the cursor and repeated polls are idempotent", async () => {
+  const counters = {};
+  const client = new ParleAgentClient({ env: ENV, fetch: unreadFetch(counters, () => [{ seq: 8 }, { seq: 9 }]) });
+  await client.connect();
+  assert.equal(client.runtime.cursor, 7);
+  await client.observeUnread();
+  assert.equal(client.runtime.unreadCount, 2);
+  assert.equal(client.runtime.cursor, 7);
+  assert.match(counters.lastInboundUrl, /since_seq=7&wait=0/);
+  await client.observeUnread();
+  assert.equal(client.runtime.unreadCount, 2);
+  assert.equal(client.runtime.cursor, 7);
+  assert.equal(counters.inbound, 2);
+  assert.match(counters.lastInboundUrl, /since_seq=7&wait=0/);
+});
+
+test("a drain during an in-flight observation discards the stale count", async () => {
+  const counters = {};
+  let releaseInbound;
+  const gate = new Promise((resolve) => { releaseInbound = resolve; });
+  const happy = happyFetch(counters);
+  let inboundCalls = 0;
+  const client = new ParleAgentClient({
+    env: ENV,
+    fetch: async (url, init) => {
+      const u = String(url);
+      if (u.includes("/inbound?")) {
+        inboundCalls += 1;
+        // First inbound request is the observation: hold it while the drain
+        // (second inbound request) completes.
+        if (inboundCalls === 1) await gate;
+        return json({ watermark: 9, messages: [{ seq: 8 }, { seq: 9 }] });
+      }
+      return happy(url, init);
+    },
+  });
+  await client.connect();
+  const observation = client.observeUnread();
+  await client.readInbox();
+  assert.equal(client.runtime.cursor, 9);
+  assert.equal(client.runtime.unreadCount, 0);
+  releaseInbound();
+  await observation;
+  assert.equal(client.runtime.unreadCount, 0, "stale positive count must not resurrect after a drain");
+});
+
+test("draining reads republish the remaining count and steady zero writes nothing", async () => {
+  const cwd = tempCwd();
+  try {
+    const counters = {};
+    const client = new ParleAgentClient({ cwd, env: ENV, fetch: unreadFetch(counters, () => [{ seq: 8 }]), publishRuntime: { adapterName: "test" } });
+    await client.connect();
+    await client.observeUnread();
+    assert.equal(client.runtime.unreadCount, 1);
+    let snapshot = JSON.parse(readFileSync(runtimeFilePath(cwd, process.pid), "utf8"));
+    assert.equal(snapshot.unreadCount, 1);
+    assert.ok(snapshot.unreadAsOf);
+    // Drain: readInbox advances the cursor past seq 8 and republishes zero.
+    await client.readInbox();
+    assert.equal(client.runtime.cursor, 8);
+    snapshot = JSON.parse(readFileSync(runtimeFilePath(cwd, process.pid), "utf8"));
+    assert.equal(snapshot.unreadCount, 0);
+    const asOfAfterDrain = snapshot.unreadAsOf;
+    // Steady zero: the stub still returns seq 8, now behind the cursor, so the
+    // next observation counts zero and must not rewrite the runtime file.
+    await client.observeUnread();
+    snapshot = JSON.parse(readFileSync(runtimeFilePath(cwd, process.pid), "utf8"));
+    assert.equal(snapshot.unreadCount, 0);
+    assert.equal(snapshot.unreadAsOf, asOfAfterDrain, "steady zero must not rewrite the runtime file");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("observation failures never touch session state", async () => {
+  const counters = {};
+  let failInbound = false;
+  const base = unreadFetch(counters, () => [{ seq: 8 }]);
+  const client = new ParleAgentClient({
+    env: ENV,
+    fetch: async (url, init) => {
+      if (String(url).includes("/inbound?") && failInbound) return json({ error: { message: "down" } }, 500);
+      return base(url, init);
+    },
+  });
+  await client.connect();
+  await client.observeUnread();
+  assert.equal(client.runtime.unreadCount, 1);
+  failInbound = true;
+  await client.observeUnread();
+  assert.equal(client.runtime.bootstrapState, "ready");
+  assert.equal(client.runtime.unreadCount, 1, "failed observation leaves the prior count to age out");
+});
+
+test("unread poll interval parses with a floor, cap, and zero-disable", () => {
+  const make = (value) => new ParleAgentClient({ env: { ...ENV, ...(value === undefined ? {} : { PARLE_UNREAD_POLL_INTERVAL_SECONDS: value }) } });
+  assert.equal(make(undefined).unreadPollIntervalMs(), 60_000);
+  assert.equal(make("0").unreadPollIntervalMs(), 0);
+  assert.equal(make("-5").unreadPollIntervalMs(), 0);
+  assert.equal(make("garbage").unreadPollIntervalMs(), 0);
+  assert.equal(make("5").unreadPollIntervalMs(), 15_000);
+  assert.equal(make("7200").unreadPollIntervalMs(), 3_600_000);
+});
+
+test("consecutive bootstrap successes never duplicate the unread poll loop", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const cwd = tempCwd();
+  try {
+    const counters = {};
+    const client = new ParleAgentClient({
+      cwd,
+      env: { ...ENV, PARLE_UNREAD_POLL_INTERVAL_SECONDS: "15" },
+      fetch: unreadFetch(counters, () => []),
+      publishRuntime: { adapterName: "test" },
+    });
+    await client.connect();
+    // Forced rebootstrap (the 401-recovery path) also lands on the success hook.
+    await client.bootstrap(undefined, true);
+    t.mock.timers.tick(20_000);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(counters.inbound ?? 0, 1, "one poll tick after two bootstraps, not two loops");
+    t.mock.timers.tick(20_000);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(counters.inbound, 2, "the chain continues singly");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("misconfigured poll interval surfaces a status warning instead of silently disabling", () => {
+  const bad = new ParleAgentClient({ env: { ...ENV, PARLE_UNREAD_POLL_INTERVAL_SECONDS: "garbage" } });
+  assert.match(bad.status().warnings.join(" "), /unread polling is disabled/);
+  const explicitOff = new ParleAgentClient({ env: { ...ENV, PARLE_UNREAD_POLL_INTERVAL_SECONDS: "0" } });
+  assert.equal(explicitOff.status().warnings.length, 0);
+  const normal = new ParleAgentClient({ env: ENV });
+  assert.equal(normal.status().warnings.length, 0);
+});
+
 test("status exposes bootstrap state and keeps the session credential redacted", async () => {
   const client = new ParleAgentClient({ env: ENV, fetch: happyFetch() });
   await client.connect();

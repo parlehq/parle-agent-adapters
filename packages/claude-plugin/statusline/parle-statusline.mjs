@@ -62,27 +62,48 @@ function main() {
   if (live.length === 1) {
     const s = live[0];
     const address = s.sessionAddress || s.roomHandle || "connected";
+    const unread = unreadInfo(s, now);
     if (FULL) {
       const parts = [`parle ✓ ${address}`];
       if (s.roomHandle && s.sessionAddress) parts.push(s.roomHandle);
       const expiry = relativeExpiry(Date.parse(s.expiresAt || ""), now);
       if (expiry) parts.push(`expires ${expiry}`);
+      if (unread?.fresh) parts.push(`${unread.count} unread`);
+      else if (unread) parts.push(`unread stale ${Math.round(unread.ageMs / 60_000)}m`);
       process.stdout.write(parts.join(" · "));
     } else {
-      process.stdout.write(`parle ✓ ${address}`);
+      process.stdout.write(`parle ✓ ${address}${unread?.fresh ? ` · ${unread.count} unread` : ""}`);
     }
     return;
   }
   if (live.length > 1) {
+    // Per-session self-excluding surfaces double-count room-wide rows, so
+    // multi-session display never sums and compact shows an indicator only.
+    const anyUnread = live.some((s) => unreadInfo(s, now)?.fresh);
     if (FULL) {
-      const addresses = live.map((s) => s.sessionAddress || "connected").join("  ");
+      const addresses = live.map((s) => {
+        const unread = unreadInfo(s, now);
+        return `${s.sessionAddress || "connected"}${unread?.fresh ? ` (${unread.count} unread)` : ""}`;
+      }).join("  ");
       process.stdout.write(`parle ✓ ${live.length} sessions in cwd: ${addresses}`);
     } else {
-      process.stdout.write(`parle ✓ ${live.length} sessions`);
+      process.stdout.write(`parle ✓ ${live.length} sessions${anyUnread ? " · unread" : ""}`);
     }
     return;
   }
   if (existsSync(join(cwd, ".parle", "credentials"))) process.stdout.write("parle · off");
+}
+
+// Freshness gate: a count is asserted only while recent (about 2.5 producer
+// intervals); after that it is suppressed in compact and labeled stale in full.
+const UNREAD_FRESH_MS = 180_000;
+
+function unreadInfo(snapshot, now) {
+  if (typeof snapshot.unreadCount !== "number" || snapshot.unreadCount <= 0) return null;
+  const asOf = Date.parse(snapshot.unreadAsOf || "");
+  if (!Number.isFinite(asOf)) return null;
+  const ageMs = now - asOf;
+  return { count: snapshot.unreadCount, ageMs, fresh: ageMs <= UNREAD_FRESH_MS };
 }
 
 function relativeExpiry(expiresAtMs, now) {

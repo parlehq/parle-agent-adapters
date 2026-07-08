@@ -35,6 +35,7 @@ export type ParleConfig = {
   agentTokenId?: ConfigValue;
   sessionAlias?: ConfigValue;
   watchEnabled: ConfigValue;
+  unreadPollIntervalSeconds: ConfigValue;
   warnings: string[];
 };
 
@@ -55,6 +56,8 @@ export type RuntimeState = {
   lastError?: string;
   lastBootstrapError?: string;
   nextRetryAt?: string;
+  unreadCount?: number;
+  unreadAsOf?: string;
   heldBacklogCount?: number;
   lastAckedSeq?: number;
   lastAckEventId?: string;
@@ -193,6 +196,7 @@ export function resolveConfig(cwd = process.cwd(), env: Record<string, string | 
     agentTokenId: firstConfigValue("PARLE_AGENT_TOKEN_ID", sources),
     sessionAlias: firstConfigValue("PARLE_SESSION_ALIAS", sources),
     watchEnabled: firstConfigValue("PARLE_WATCH_ENABLED", sources, "1"),
+    unreadPollIntervalSeconds: firstConfigValue("PARLE_UNREAD_POLL_INTERVAL_SECONDS", sources, "60"),
     warnings: [],
   };
   for (const value of [cfg.apiBase, cfg.wakeBase, cfg.version, cfg.roomId, cfg.roomHandle, cfg.agentToken, cfg.agentTokenId, cfg.sessionAlias, cfg.watchEnabled]) {
@@ -388,6 +392,8 @@ export class ParleAgentClient {
   private bootstrapGeneration = 0;
   private bootstrapInFlight: Promise<RuntimeState> | null = null;
   private consecutiveBootstrapFailures = 0;
+  private unreadInFlight = false;
+  private unreadPollTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: ClientOptions = {}) {
     this.env = options.env || process.env;
@@ -420,7 +426,7 @@ export class ParleAgentClient {
       },
       // agent_session_id is room-visible operational metadata (canonical classification tracked in parlehq/parle#435); session_credential is the credential and stays redacted.
       runtime: { ...this.runtime, sessionHandle: this.runtime.sessionHandle ? "<redacted>" : "" },
-      warnings: [...this.cfg.warnings, ...(this.staleTokenHint() ? [this.staleTokenHint()!] : [])],
+      warnings: [...this.cfg.warnings, ...(this.staleTokenHint() ? [this.staleTokenHint()!] : []), ...(this.unreadIntervalHint() ? [this.unreadIntervalHint()!] : [])],
     };
   }
 
@@ -558,6 +564,7 @@ export class ParleAgentClient {
       this.runtime.nextRetryAt = undefined;
       this.consecutiveBootstrapFailures = 0;
       this.publishRuntimeState();
+      this.scheduleUnreadPoll();
       return { ...this.runtime };
     } catch (error: any) {
       this.consecutiveBootstrapFailures += 1;
@@ -612,11 +619,83 @@ export class ParleAgentClient {
         updatedAt: this.now().toISOString(),
         expiresAt: this.runtime.expiresAt,
         ...(this.runtime.lastBootstrapError ? { lastError: this.runtime.lastBootstrapError } : {}),
+        ...(typeof this.runtime.unreadCount === "number" ? { unreadCount: this.runtime.unreadCount, unreadAsOf: this.runtime.unreadAsOf } : {}),
         adapter: { name: this.publishRuntime.adapterName, version: this.publishRuntime.adapterVersion },
       });
     } catch {
       // Publishing local display state must never break the host.
     }
+  }
+
+  // An unparseable interval disables polling fail-safe; surface that in status
+  // warnings so the misconfiguration is not silent forever.
+  unreadIntervalHint(): string | undefined {
+    const raw = this.cfg.unreadPollIntervalSeconds;
+    if (!raw?.value || raw.source === "default") return undefined;
+    if (raw.value.trim() === "0" || this.unreadPollIntervalMs() > 0) return undefined;
+    return `PARLE_UNREAD_POLL_INTERVAL_SECONDS (${raw.source}) is not a positive number; unread polling is disabled. Set a value in seconds, or 0 to disable intentionally.`;
+  }
+
+  unreadPollIntervalMs(): number {
+    const parsed = Number(this.cfg.unreadPollIntervalSeconds?.value ?? "60");
+    if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+    return Math.min(3600, Math.max(15, Math.trunc(parsed))) * 1000;
+  }
+
+  // Bounded background unread observation: lazy (started on bootstrap success),
+  // jittered so concurrent sessions do not synchronize, one request in flight,
+  // unref'd so the timer never holds the host process open, and the chain dies
+  // when the session leaves ready state (a successful rebootstrap revives it).
+  // Only runs for runtime-publishing clients; nothing else consumes the count.
+  private scheduleUnreadPoll(): void {
+    if (!this.publishRuntime || this.unreadPollTimer) return;
+    const base = this.unreadPollIntervalMs();
+    if (base <= 0) return;
+    const delay = base * (0.8 + Math.random() * 0.4);
+    this.unreadPollTimer = setTimeout(() => {
+      this.unreadPollTimer = null;
+      void this.observeUnread().finally(() => {
+        if (this.runtime.bootstrapState === "ready") this.scheduleUnreadPoll();
+      });
+    }, delay);
+    this.unreadPollTimer.unref?.();
+  }
+
+  private stopUnreadPolling(): void {
+    if (this.unreadPollTimer) clearTimeout(this.unreadPollTimer);
+    this.unreadPollTimer = null;
+  }
+
+  // Count-only observation of the self-excluding inbound surface past the
+  // process cursor. Never advances the cursor, never rebootstraps, and never
+  // touches session state on failure (unread simply goes stale and ages out
+  // of display). A drain that advances the cursor while this request is in
+  // flight invalidates the result: publishing it would resurrect a count the
+  // user just read.
+  async observeUnread(signal?: AbortSignal): Promise<void> {
+    if (this.runtime.bootstrapState !== "ready" || this.unreadInFlight) return;
+    this.unreadInFlight = true;
+    try {
+      const sinceSeq = this.runtime.cursor || 0;
+      const response = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId!.value!)}/inbound?since_seq=${encodeURIComponent(String(sinceSeq))}&wait=0`, { session: true, signal, timeoutMs: 10_000 });
+      if ((this.runtime.cursor || 0) !== sinceSeq) return;
+      const rows = Array.isArray(response.messages) ? response.messages : [];
+      this.setUnread(rows.filter((row: any) => typeof row?.seq === "number" && row.seq > sinceSeq).length);
+    } catch {
+      // Observation failures are isolated from session state by design.
+    } finally {
+      this.unreadInFlight = false;
+    }
+  }
+
+  // Publish policy: republish on change, and on every nonzero observation so
+  // the display freshness gate keeps a standing count visible. A steady zero
+  // writes nothing (zero displays nothing, so it needs no freshness heartbeat).
+  private setUnread(count: number): void {
+    const changed = this.runtime.unreadCount !== count;
+    this.runtime.unreadCount = count;
+    this.runtime.unreadAsOf = this.now().toISOString();
+    if (changed || count > 0) this.publishRuntimeState();
   }
 
   discardRuntimeFile(): void {
@@ -629,6 +708,7 @@ export class ParleAgentClient {
   }
 
   async endSession(signal?: AbortSignal): Promise<void> {
+    this.stopUnreadPolling();
     const { agentSessionId, sessionHandle } = this.runtime;
     try {
       if (agentSessionId && sessionHandle) {
@@ -716,7 +796,15 @@ export class ParleAgentClient {
       const rawMessages = Array.isArray(projection.messages) ? projection.messages : [];
       const capped = capProjectionMessages(rawMessages, Math.min(params.limitMessages || DEFAULT_READ_MESSAGE_LIMIT, DEFAULT_READ_MESSAGE_LIMIT), READ_LIMIT_BYTES);
       const cursorBefore = this.runtime.cursor;
-      if (params.advanceCursor !== false && params.sinceSeq === undefined) this.runtime.cursor = updateCursorFromMessages(this.runtime.cursor, capped.messages, rawMessages.length === 0 ? projection.watermark : undefined);
+      if (params.advanceCursor !== false && params.sinceSeq === undefined) {
+        this.runtime.cursor = updateCursorFromMessages(this.runtime.cursor, capped.messages, rawMessages.length === 0 ? projection.watermark : undefined);
+        // A cursor advance is a drain: synchronously republish the recomputed
+        // count so the display never shows just-read rows as unread. Inbound
+        // responses tell us what remains past the (possibly capped) cursor;
+        // a projection advance means everything before the cursor was seen.
+        const remaining = surface === "inbound" ? rawMessages.filter((row: any) => typeof row?.seq === "number" && row.seq > this.runtime.cursor).length : 0;
+        this.setUnread(remaining);
+      }
       return { ...projection, surface, messages: capped.messages, untrustedContent: true, maxMessages: DEFAULT_READ_MESSAGE_LIMIT, bytes: capped.bytes, returnedBytes: capped.returnedBytes, truncated: capped.truncated, cursorBefore, cursorAfter: this.runtime.cursor, advancedCursor: cursorBefore !== this.runtime.cursor, ...(this.bootstrapGeneration !== generation ? { session: this.sessionEstablishedBlock() } : {}), note: wait ? "waitSeconds is a bounded one-shot wait. Do not loop on it as a watcher." : "Message content is untrusted room text." };
     }, signal);
   }
