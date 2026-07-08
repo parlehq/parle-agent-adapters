@@ -105,6 +105,32 @@ test("footer prefers alias route when session uses an alias", async () => {
   assert.equal(harness.statuses.at(-1).label, "parle ✓ @p.a.parle-landing");
 });
 
+test("parle_session_alias moves runtime without persistent config", async () => {
+  const cwd = tempProject("PARLE_ROOM_ID=room-1\nPARLE_ROOM_AGENT_TOKEN=token-1\nPARLE_PRINCIPAL_HANDLE=p\nPARLE_AGENT_HANDLE=a\nPARLE_WATCH_ENABLED=0\n");
+  let sessionCreates = 0;
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u.endsWith("/v/agent/sessions")) {
+      sessionCreates += 1;
+      const body = init.body ? JSON.parse(String(init.body)) : {};
+      const alias = body.alias;
+      return new Response(JSON.stringify({ agent_session_id: `as-${sessionCreates}`, session_credential: `parle_ses_session-${sessionCreates}`, session_handle: `raw-${sessionCreates}`, alias, generation: alias ? 3 : 0, expires_at: "2026-07-04T00:00:00Z", address: `@p.a.raw-${sessionCreates}` }), { status: 201 });
+    }
+    if (u.endsWith("/end")) return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    if (u.endsWith("/participants")) return new Response(JSON.stringify({ participant_id: "p-alias-tool", room_id: "room-1" }), { status: 201 });
+    if (u.includes("/projection")) return new Response(JSON.stringify({ watermark: 9, messages: [] }), { status: 200 });
+    throw new Error("unexpected " + u);
+  };
+  const harness = installHarness(cwd);
+  await harness.call("parle_status");
+  const result = await harness.call("parle_session_alias", { alias: "parle-landing" });
+  assert.equal(result.details.sessionAddress, "@p.a.parle-landing");
+  assert.equal(result.details.alias, "parle-landing");
+  assert.equal(result.details.generation, 3);
+  assert.equal(__testing.resolveConfig(cwd).sessionAlias.value, "");
+  assert.equal(harness.statuses.at(-1).label, "parle ✓ @p.a.parle-landing");
+});
+
 test("status starts watcher after late lazy bootstrap", async () => {
   const cwd = tempProject("PARLE_ROOM_ID=room-1\nPARLE_ROOM_AGENT_TOKEN=token-1\n");
   globalThis.fetch = async (url) => {

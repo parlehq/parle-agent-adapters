@@ -139,6 +139,10 @@ type ParleInboxParams = {
   advanceCursor?: boolean;
 };
 
+type ParleSessionAliasParams = {
+  alias: string;
+};
+
 let runtime: RuntimeState = { bootstrapped: false, watcherState: "off" };
 let lastCtx: any | undefined;
 let watcherAbort: AbortController | undefined;
@@ -857,14 +861,15 @@ function sessionRouteAddress(cfg: ParleConfig, session: any): string | null {
   return null;
 }
 
-async function bootstrap(ctx: any, cfg: ParleConfig, signal?: AbortSignal, preserveCursor = false) {
+async function bootstrap(ctx: any, cfg: ParleConfig, signal?: AbortSignal, preserveCursor = false, aliasOverride?: string) {
   assertRuntimeConfig(cfg);
   const previousCursor = runtime.cursor;
   const sessionBody: Record<string, string> = {};
-  if (cfg.sessionAlias?.value) sessionBody.alias = cfg.sessionAlias.value;
+  const alias = aliasOverride || cfg.sessionAlias?.value;
+  if (alias) sessionBody.alias = alias;
   const session = await requestJson(cfg, "/v/agent/sessions", { method: "POST", body: sessionBody, signal });
   runtime.sessionHandle = String(session.session_credential || "");
-  runtime.sessionAlias = typeof session.alias === "string" && session.alias ? session.alias : cfg.sessionAlias?.value;
+  runtime.sessionAlias = typeof session.alias === "string" && session.alias ? session.alias : alias;
   runtime.sessionGeneration = typeof session.generation === "number" ? session.generation : undefined;
   runtime.sessionAddress = sessionRouteAddress(cfg, session);
   runtime.agentSessionId = String(session.agent_session_id || "");
@@ -885,6 +890,29 @@ async function bootstrap(ctx: any, cfg: ParleConfig, signal?: AbortSignal, prese
 
 async function ensureBootstrapped(ctx: any, cfg: ParleConfig, signal?: AbortSignal) {
   if (!runtime.bootstrapped || !runtime.sessionHandle) await bootstrap(ctx, cfg, signal);
+}
+
+function assertSessionAlias(alias: string) {
+  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(alias) || alias.length < 2 || alias.length > 40) {
+    throw new Error("Parle session alias must be 2-40 lowercase letters, digits, and single hyphens.");
+  }
+}
+
+async function useSessionAlias(pi: any, ctx: any, cfg: ParleConfig, alias: string, signal?: AbortSignal) {
+  assertSessionAlias(alias);
+  stopWatcher(ctx);
+  await endAgentSession(cfg, signal).catch((error) => {
+    runtime.lastError = redactString(error instanceof Error ? error.message : String(error));
+  });
+  await bootstrap(ctx, cfg, signal, true, alias);
+  startWatcher(pi, ctx, cfg);
+  return {
+    status: "alias_active",
+    alias: runtime.sessionAlias,
+    generation: runtime.sessionGeneration,
+    sessionAddress: runtime.sessionAddress,
+    expiresAt: runtime.expiresAt,
+  };
 }
 
 async function withRebootstrap<T>(ctx: any, cfg: ParleConfig, fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -1317,6 +1345,7 @@ export const __testing = {
   handleWakeHint,
   parseSSEBlocks,
   resolveConfig,
+  useSessionAlias,
   runtimeState() { return runtime; },
   patchRuntime(patch: Partial<RuntimeState>) { runtime = { ...runtime, ...patch }; },
   setStatus,
@@ -1380,6 +1409,21 @@ export default function parleExtension(pi: any) {
         return;
       }
       ctx.ui.notify(`Parle watcher: ${runtime.watcherState || "off"}`, "info");
+    },
+  });
+
+  pi.registerTool({
+    name: "parle_session_alias",
+    label: "Parle Session Alias",
+    description: "Move this live Pi session to a durable Parle session alias without writing persistent config.",
+    parameters: Type.Object({
+      alias: Type.String({ description: "Alias for this live session, e.g. parle-landing. Lowercase letters, digits, and hyphens only." }),
+    }),
+    async execute(_id, params: ParleSessionAliasParams, signal, _update, ctx) {
+      lastCtx = ctx;
+      const cfg = resolveConfig(ctx.cwd || process.cwd());
+      const details = await useSessionAlias(pi, ctx, cfg, params.alias, signal);
+      return formatResult(details);
     },
   });
 
