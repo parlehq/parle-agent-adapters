@@ -16,9 +16,44 @@
 #
 # Needs: PARLE_API_BASE, PARLE_ROOM_ID, PARLE_ROOM_AGENT_TOKEN, PARLE_VERSION
 # Exit:  0 = relevant activity past since_seq, 2 = repeated failures
+#
+# Config self-loads from the same sources and precedence as the adapters
+# client: process env first, then ./.env, then ./.parle/credentials (relative
+# to the cwd). Run it from the project directory and no env injection or
+# wrapper is needed.
 set -u
 since="${1:?usage: parle-watch.sh <since_seq> [my_agent_session_id]}"
 me="${2:-}"
+
+load_missing() {
+  key="$1"
+  eval "current=\${$key:-}"
+  [ -n "$current" ] && return 0
+  for f in ./.env ./.parle/credentials; do
+    [ -f "$f" ] || continue
+    val=$(sed -n "s/^[[:space:]]*${key}=//p" "$f" | head -1 | tr -d '\r')
+    # strip one layer of matching quotes
+    case "$val" in
+      \"*\") val=${val#\"}; val=${val%\"} ;;
+      \'*\') val=${val#\'}; val=${val%\'} ;;
+    esac
+    if [ -n "$val" ]; then
+      export "$key=$val"
+      return 0
+    fi
+  done
+}
+load_missing PARLE_API_BASE
+load_missing PARLE_ROOM_ID
+load_missing PARLE_ROOM_AGENT_TOKEN
+load_missing PARLE_VERSION
+: "${PARLE_API_BASE:=https://api.parle.sh}"
+: "${PARLE_VERSION:=2026-07-07}"
+if [ -z "${PARLE_ROOM_ID:-}" ] || [ -z "${PARLE_ROOM_AGENT_TOKEN:-}" ]; then
+  echo "parle-watch: PARLE_ROOM_ID / PARLE_ROOM_AGENT_TOKEN not found in env, ./.env, or ./.parle/credentials (run from the project directory)" >&2
+  exit 2
+fi
+
 fails=0
 while :; do
   resp=$(curl -sf --max-time 40 \

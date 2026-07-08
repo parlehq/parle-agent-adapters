@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2 (2026-07-07)
+
+`parle-watch.sh` self-loads its configuration.
+
+- The watch script required `PARLE_API_BASE`/`PARLE_ROOM_ID`/`PARLE_ROOM_AGENT_TOKEN`/`PARLE_VERSION` in the host shell, but harness shells typically do not export them (config lives in `.parle/credentials`), forcing every session to discover the `set -a` sourcing workaround. The script now fills missing values from `./.env` then `./.parle/credentials` with process env taking precedence, mirroring the client's source order, and exits 2 with a clear message when no config is found. Run it from the project directory; invocation args are unchanged (`<since_seq> [agent_session_id]`, required since the script's introduction).
+
 ## 0.5.1 (2026-07-07)
 
 Eager server spawn: `alwaysLoad: true` on the bundled MCP server (requires Claude Code 2.1.121+; older versions ignore the field).
