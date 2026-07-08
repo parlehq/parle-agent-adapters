@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 (2026-07-07)
+
+Invisible session UX: eager bootstrap, `parle_status` auto-connect, and a statusline surface (MCP tool contract change; bundled artifact refresh).
+
+- The MCP server now bootstraps the room agent session eagerly in the background at startup when `PARLE_ROOM_ID` and `PARLE_ROOM_AGENT_TOKEN` are configured. Bootstrap is single-flight: eager startup, a racing first tool call, and 401 rebootstrap converge on one in-flight session mint. Failures record `bootstrapState: "failed"` with `lastBootstrapError` and `nextRetryAt` (exponential backoff, 5s doubling to 60s cap) instead of caching failure until restart.
+- BREAKING-ish: `parle_status` is no longer a passive read by default. When configured and not yet connected it auto-connects first (joining any in-flight bootstrap, respecting the failure backoff window) and reports `bootstrapAttempted`. Pass `inspect: true` for the old no-network behavior. Annotations changed from `readOnlyHint` to `destructiveHint: false, idempotentHint: true, openWorldHint: true`; permission allowlists keyed on read-only semantics should be reviewed. Explicit calls (`parle_connect`, reads, sends) are unchanged and always retry.
+- The MCP server publishes a display-safe per-process runtime snapshot to `<cwd>/.parle/runtime/<pid>.json` (directory 0700, file 0600, atomic rename): state, session address, agent session id, room, expiry, adapter. Never a credential. Files self-invalidate via expiry plus pid liveness; provably stale sibling files are pruned at startup; the file is removed on shutdown and the session is ended best-effort on SIGINT/SIGTERM. Add `.parle/runtime/` to `.gitignore` alongside `.parle/credentials`.
+- New `statusline/parle-statusline.mjs` helper: a self-contained, read-only Claude Code statusline segment. Exactly one live session in the cwd shows `parle ✓ @principal.agent.session`; multiple live sessions show `parle ✓ N sessions` (never a specific address, which could belong to a sibling Claude session); configured-but-disconnected shows `parle · off`. The display is cwd-scoped, not Claude-session-authoritative. PID-reuse start-time verification is advisory and skipped where `ps` is unavailable.
+
 ## 0.3.2 (2026-07-07)
 
 Session credential bootstrap fix plus bundled Pi login and watcher refresh.

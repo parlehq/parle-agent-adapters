@@ -1,6 +1,9 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { RUNTIME_SCHEMA_VERSION, processStartedAtIso, pruneRuntimeFiles, removeRuntimeFile, writeRuntimeFile } from "./runtime-file.js";
+
+export * from "./runtime-file.js";
 
 export const DEFAULT_API_BASE = "https://api.parle.sh";
 export const DEFAULT_WAKE_BASE = DEFAULT_API_BASE;
@@ -35,8 +38,11 @@ export type ParleConfig = {
   warnings: string[];
 };
 
+export type BootstrapState = "unstarted" | "starting" | "ready" | "failed";
+
 export type RuntimeState = {
   bootstrapped: boolean;
+  bootstrapState: BootstrapState;
   sessionHandle: string;
   sessionAddress: string | null;
   agentSessionId: string;
@@ -47,6 +53,8 @@ export type RuntimeState = {
   lastHeartbeatAt?: string;
   lastHttpStatus?: number;
   lastError?: string;
+  lastBootstrapError?: string;
+  nextRetryAt?: string;
   heldBacklogCount?: number;
   lastAckedSeq?: number;
   lastAckEventId?: string;
@@ -58,6 +66,10 @@ export type ClientOptions = {
   fetch?: FetchLike;
   now?: () => Date;
   randomUUID?: () => string;
+  // When set, the client publishes a display-safe per-pid runtime snapshot to
+  // .parle/runtime/<pid>.json on every bootstrap state change (see runtime-file.ts)
+  // and prunes provably stale sibling files at construction.
+  publishRuntime?: { adapterName: string; adapterVersion?: string };
 };
 
 export type RequestOptions = {
@@ -361,8 +373,10 @@ export class ParleAgentClient {
   readonly env: Record<string, string | undefined>;
   readonly now: () => Date;
   readonly randomUUID: () => string;
+  readonly publishRuntime?: { adapterName: string; adapterVersion?: string };
   runtime: RuntimeState = {
     bootstrapped: false,
+    bootstrapState: "unstarted",
     sessionHandle: "",
     sessionAddress: null,
     agentSessionId: "",
@@ -372,6 +386,8 @@ export class ParleAgentClient {
     cursor: 0,
   };
   private bootstrapGeneration = 0;
+  private bootstrapInFlight: Promise<RuntimeState> | null = null;
+  private consecutiveBootstrapFailures = 0;
 
   constructor(options: ClientOptions = {}) {
     this.env = options.env || process.env;
@@ -380,6 +396,14 @@ export class ParleAgentClient {
     this.fetchImpl = options.fetch || fetch;
     this.now = options.now || (() => new Date());
     this.randomUUID = options.randomUUID || randomUUID;
+    this.publishRuntime = options.publishRuntime;
+    if (this.publishRuntime) {
+      try {
+        pruneRuntimeFiles(this.cwd, this.now());
+      } catch {
+        // Local state hygiene must never block client construction.
+      }
+    }
   }
 
   status() {
@@ -488,35 +512,142 @@ export class ParleAgentClient {
     return json;
   }
 
-  async bootstrap(signal?: AbortSignal, preserveCursor = false) {
-    this.assertConfigured();
-    const previousCursor = this.runtime.cursor;
-    const body: Record<string, string> = {};
-    if (this.cfg.sessionAlias?.value) body.alias = this.cfg.sessionAlias.value;
-    // rawResponse: session_credential is a parle_ses_ secret; the default
-    // redacted parse would replace it with <redacted-token> and every
-    // subsequent Parle-Agent-Session presentation would 401.
-    const session = await this.requestJson("/v/agent/sessions", { method: "POST", body, signal, rawResponse: true });
-    this.runtime.sessionHandle = String(session.session_credential || "");
-    this.runtime.sessionAddress = typeof session.address === "string" ? session.address : null;
-    this.runtime.agentSessionId = String(session.agent_session_id || "");
-    this.runtime.expiresAt = String(session.expires_at || "");
-    this.runtime.roomId = this.cfg.roomId!.value!;
-    const entry = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId!.value!)}/participants`, { method: "POST", session: true, signal });
-    this.runtime.participantId = String(entry.participant_id || "");
-    this.runtime.bootstrapped = true;
-    if (preserveCursor) this.runtime.cursor = previousCursor;
-    else {
-      const projection = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId!.value!)}/projection?wait=0`, { session: true, signal });
-      this.runtime.cursor = typeof projection.watermark === "number" ? projection.watermark : 0;
-      if (typeof projection?.held_backlog?.held_count === "number") this.runtime.heldBacklogCount = projection.held_backlog.held_count;
+  // Single-flight: concurrent callers (eager startup, racing first tool call,
+  // 401 rebootstrap) converge on one in-flight session mint instead of minting
+  // duplicates with last-writer-wins runtime state.
+  async bootstrap(signal?: AbortSignal, preserveCursor = false): Promise<RuntimeState> {
+    if (this.bootstrapInFlight) return this.bootstrapInFlight;
+    const run = this.doBootstrap(signal, preserveCursor);
+    this.bootstrapInFlight = run;
+    try {
+      return await run;
+    } finally {
+      this.bootstrapInFlight = null;
     }
-    this.bootstrapGeneration += 1;
-    return { ...this.runtime };
+  }
+
+  private async doBootstrap(signal?: AbortSignal, preserveCursor = false): Promise<RuntimeState> {
+    this.runtime.bootstrapState = "starting";
+    this.publishRuntimeState();
+    try {
+      this.assertConfigured();
+      const previousCursor = this.runtime.cursor;
+      const body: Record<string, string> = {};
+      if (this.cfg.sessionAlias?.value) body.alias = this.cfg.sessionAlias.value;
+      // rawResponse: session_credential is a parle_ses_ secret; the default
+      // redacted parse would replace it with <redacted-token> and every
+      // subsequent Parle-Agent-Session presentation would 401.
+      const session = await this.requestJson("/v/agent/sessions", { method: "POST", body, signal, rawResponse: true });
+      this.runtime.sessionHandle = String(session.session_credential || "");
+      this.runtime.sessionAddress = typeof session.address === "string" ? session.address : null;
+      this.runtime.agentSessionId = String(session.agent_session_id || "");
+      this.runtime.expiresAt = String(session.expires_at || "");
+      this.runtime.roomId = this.cfg.roomId!.value!;
+      const entry = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId!.value!)}/participants`, { method: "POST", session: true, signal });
+      this.runtime.participantId = String(entry.participant_id || "");
+      this.runtime.bootstrapped = true;
+      if (preserveCursor) this.runtime.cursor = previousCursor;
+      else {
+        const projection = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId!.value!)}/projection?wait=0`, { session: true, signal });
+        this.runtime.cursor = typeof projection.watermark === "number" ? projection.watermark : 0;
+        if (typeof projection?.held_backlog?.held_count === "number") this.runtime.heldBacklogCount = projection.held_backlog.held_count;
+      }
+      this.bootstrapGeneration += 1;
+      this.runtime.bootstrapState = "ready";
+      this.runtime.lastBootstrapError = undefined;
+      this.runtime.nextRetryAt = undefined;
+      this.consecutiveBootstrapFailures = 0;
+      this.publishRuntimeState();
+      return { ...this.runtime };
+    } catch (error: any) {
+      this.consecutiveBootstrapFailures += 1;
+      const backoffMs = Math.min(60_000, 5_000 * 2 ** (this.consecutiveBootstrapFailures - 1));
+      this.runtime.bootstrapState = "failed";
+      this.runtime.lastBootstrapError = redactString(error instanceof Error ? error.message : String(error));
+      this.runtime.nextRetryAt = new Date(this.now().getTime() + backoffMs).toISOString();
+      this.publishRuntimeState();
+      throw error;
+    }
   }
 
   async ensureBootstrapped(signal?: AbortSignal) {
     if (!this.runtime.bootstrapped || !this.runtime.sessionHandle) await this.bootstrap(signal);
+  }
+
+  private sessionExpired(): boolean {
+    const expiry = this.runtime.expiresAt ? new Date(this.runtime.expiresAt) : null;
+    return expiry !== null && !Number.isNaN(expiry.getTime()) && expiry <= this.now();
+  }
+
+  // Non-throwing bootstrap for eager startup and status auto-connect. Returns
+  // whether a bootstrap was attempted. Skips when already live, unconfigured,
+  // or inside the failure backoff window (explicit tool calls like connect/read/
+  // send are user-paced and always retry; this path is the one that could hammer).
+  async ensureReadySafe(signal?: AbortSignal): Promise<boolean> {
+    if (this.runtime.bootstrapped && this.runtime.sessionHandle && !this.sessionExpired()) return false;
+    if (!this.cfg.roomId?.value || !this.cfg.agentToken?.value) return false;
+    if (this.runtime.bootstrapState === "failed" && this.runtime.nextRetryAt && new Date(this.runtime.nextRetryAt) > this.now()) return false;
+    try {
+      await this.bootstrap(signal);
+    } catch {
+      // Failure details are recorded on runtime by doBootstrap.
+    }
+    return true;
+  }
+
+  private publishRuntimeState(): void {
+    if (!this.publishRuntime) return;
+    try {
+      writeRuntimeFile(this.cwd, {
+        schemaVersion: RUNTIME_SCHEMA_VERSION,
+        pid: process.pid,
+        processStartedAt: processStartedAtIso(this.now()),
+        state: this.runtime.bootstrapState === "ready" ? "ready" : this.runtime.bootstrapState === "failed" ? "failed" : "starting",
+        sessionAddress: this.runtime.sessionAddress,
+        // agent_session_id is room-visible operational metadata, not a credential
+        // (parlehq/parle#435); session_credential never leaves process memory.
+        agentSessionId: this.runtime.agentSessionId,
+        roomId: this.runtime.roomId || this.cfg.roomId?.value || "",
+        roomHandle: this.cfg.roomHandle?.value,
+        updatedAt: this.now().toISOString(),
+        expiresAt: this.runtime.expiresAt,
+        ...(this.runtime.lastBootstrapError ? { lastError: this.runtime.lastBootstrapError } : {}),
+        adapter: { name: this.publishRuntime.adapterName, version: this.publishRuntime.adapterVersion },
+      });
+    } catch {
+      // Publishing local display state must never break the host.
+    }
+  }
+
+  discardRuntimeFile(): void {
+    if (!this.publishRuntime) return;
+    try {
+      removeRuntimeFile(this.cwd, process.pid);
+    } catch {
+      // Best-effort; expiry self-invalidates the file for readers.
+    }
+  }
+
+  async endSession(signal?: AbortSignal): Promise<void> {
+    const { agentSessionId, sessionHandle } = this.runtime;
+    try {
+      if (agentSessionId && sessionHandle) {
+        await this.requestJson(`/v/agent/sessions/${encodeURIComponent(agentSessionId)}/end`, { method: "POST", session: true, signal, timeoutMs: 2000 });
+      }
+    } finally {
+      this.runtime = {
+        bootstrapped: false,
+        bootstrapState: "unstarted",
+        sessionHandle: "",
+        sessionAddress: null,
+        agentSessionId: "",
+        expiresAt: "",
+        participantId: "",
+        roomId: "",
+        cursor: 0,
+      };
+      this.discardRuntimeFile();
+    }
   }
 
   // @parle-interpretation parlehq/parle#434
@@ -541,9 +672,7 @@ export class ParleAgentClient {
   }
 
   async connect(signal?: AbortSignal): Promise<ConnectionSummary> {
-    const expiry = this.runtime.expiresAt ? new Date(this.runtime.expiresAt) : null;
-    const expired = expiry !== null && !Number.isNaN(expiry.getTime()) && expiry <= this.now();
-    const reused = this.runtime.bootstrapped && Boolean(this.runtime.sessionHandle) && !expired;
+    const reused = this.runtime.bootstrapped && Boolean(this.runtime.sessionHandle) && !this.sessionExpired();
     if (!reused) await this.bootstrap(signal);
     return this.connectionSummary(reused);
   }

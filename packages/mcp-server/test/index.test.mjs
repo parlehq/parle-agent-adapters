@@ -139,6 +139,89 @@ function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+function realClientEnv() {
+  return { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "opaque-token" };
+}
+
+function sessionFetch(counters) {
+  return async (url) => {
+    counters.total = (counters.total || 0) + 1;
+    const u = String(url);
+    if (u.endsWith("/v/agent/sessions")) {
+      counters.sessions = (counters.sessions || 0) + 1;
+      return json({ agent_session_id: "as-1", session_credential: "parle_ses_s1", address: "@p.a.s1", expires_at: new Date(Date.now() + 3_600_000).toISOString() }, 201);
+    }
+    if (u.endsWith("/participants")) return json({ participant_id: "part-1" }, 201);
+    if (u.includes("/projection")) return json({ watermark: 0, messages: [] });
+    return json({});
+  };
+}
+
+test("parle_status auto-connects a configured client and reports the attempt", async () => {
+  const counters = {};
+  const clientImpl = new ParleAgentClient({ env: realClientEnv(), fetch: sessionFetch(counters) });
+  const server = createParleMcpServer(clientImpl);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "parle-mcp-status-auto", version: "0.0.0" }, { capabilities: {} });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const first = await client.callTool({ name: "parle_status", arguments: {} });
+    assert.equal(first.structuredContent.bootstrapAttempted, true);
+    assert.equal(first.structuredContent.runtime.bootstrapped, true);
+    assert.equal(first.structuredContent.runtime.bootstrapState, "ready");
+    assert.equal(first.structuredContent.runtime.sessionAddress, "@p.a.s1");
+    assert.equal(counters.sessions, 1);
+    const second = await client.callTool({ name: "parle_status", arguments: {} });
+    assert.equal(second.structuredContent.bootstrapAttempted, false);
+    assert.equal(counters.sessions, 1);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("parle_status inspect:true is a passive read with no network side effects", async () => {
+  const counters = {};
+  const clientImpl = new ParleAgentClient({ env: realClientEnv(), fetch: sessionFetch(counters) });
+  const server = createParleMcpServer(clientImpl);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "parle-mcp-status-inspect", version: "0.0.0" }, { capabilities: {} });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const result = await client.callTool({ name: "parle_status", arguments: { inspect: true } });
+    assert.equal(result.structuredContent.bootstrapAttempted, false);
+    assert.equal(result.structuredContent.runtime.bootstrapped, false);
+    assert.equal(counters.total ?? 0, 0);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("parle_status works against minimal fake clients without lifecycle methods", async () => {
+  const fakeClient = {
+    status: () => ({ ok: true }),
+    setup: () => ({}),
+    guidance: async () => ({}),
+    readProjection: async () => ({}),
+    readInbox: async () => ({}),
+    affordances: async () => ({}),
+    send: async () => ({}),
+  };
+  const server = createParleMcpServer(fakeClient);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "parle-mcp-status-fake", version: "0.0.0" }, { capabilities: {} });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const result = await client.callTool({ name: "parle_status", arguments: {} });
+    assert.equal(result.structuredContent.ok, true);
+    assert.equal(result.structuredContent.bootstrapAttempted, false);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
 test("stdio server lists the eight v1 tools and setup works without secrets", async () => {
   const transport = new StdioClientTransport({
     command: process.execPath,

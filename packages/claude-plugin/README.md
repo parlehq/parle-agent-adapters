@@ -43,6 +43,27 @@ Config sources resolve in strict precedence -- process environment, then `<cwd>/
 
 Leave `PARLE_SESSION_ALIAS` unset for ordinary Claude sessions. Each process should normally use its generated ephemeral address. Set `PARLE_SESSION_ALIAS` only for a deliberately singleton named role because every new process with the same alias takes over that route and supersedes the previous session.
 
+### Session lifecycle (0.4.0)
+
+When configured, the MCP server connects the room agent session eagerly at startup, so the session address exists before the first tool call. `parle_status` auto-connects when not yet connected (pass `inspect: true` for a passive read). The server also writes a display-safe runtime snapshot to `<cwd>/.parle/runtime/<pid>.json` for local UX surfaces; it never contains a credential. Add `.parle/runtime/` to `.gitignore` alongside `.parle/credentials`.
+
+### Statusline
+
+`statusline/parle-statusline.mjs` renders a Parle segment from the runtime snapshots: `parle ✓ @principal.agent.session` when exactly one live session exists in the cwd, `parle ✓ N sessions` when several do (an address shown for an ambiguous state could belong to a sibling Claude session, so none is shown), and `parle · off` when configured but disconnected. The display is cwd-scoped, not Claude-session-authoritative.
+
+Wire it into your own statusline command, for example:
+
+```bash
+#!/usr/bin/env bash
+input=$(cat)
+parle=$(node ~/.claude/plugins/marketplaces/parlehq/packages/claude-plugin/statusline/parle-statusline.mjs <<<"$input")
+echo "$(basename "$(pwd)") ${parle}"
+```
+
+The script is read-only, self-contained (no dependencies), and never blocks or errors the statusline; adjust the path to wherever the plugin is installed.
+
+Liveness gating: `state: ready`, unexpired `expiresAt` (with skew), and a live pid are hard requirements. PID start-time verification is best-effort hardening against pid reuse, not a liveness prerequisite: a verifiable mismatch reads as not live, but where process inspection is unavailable (sandboxed or hardened hosts deny `ps`) the check is skipped and expiry bounds the reuse window.
+
 ### Permissions
 
 Claude Code namespaces plugin MCP tools by plugin and server name. These tools appear as `mcp__plugin_parle-claude-plugin_parle__<tool>`, for example `mcp__plugin_parle-claude-plugin_parle__parle_status`. Use that full prefix in `settings.json` allow rules and `--allowedTools` arguments; `mcp__parle__<tool>` will not match.

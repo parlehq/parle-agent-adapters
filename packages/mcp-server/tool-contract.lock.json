@@ -71,8 +71,12 @@
   "parle_status": {
     "title": "Parle Status",
     "annotations": {
-      "readOnlyHint": true
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     },
-    "input": []
+    "input": [
+      "inspect"
+    ]
   }
 }

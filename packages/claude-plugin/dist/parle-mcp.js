@@ -30956,9 +30956,77 @@ var StdioServerTransport = class {
 import { pathToFileURL } from "node:url";
 
 // ../client/dist/index.js
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync as readFileSync2, existsSync } from "node:fs";
+import { join as join2 } from "node:path";
 import { randomUUID } from "node:crypto";
+
+// ../client/dist/runtime-file.js
+import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+var RUNTIME_SCHEMA_VERSION = 1;
+var RUNTIME_DIR_SEGMENTS = [".parle", "runtime"];
+function runtimeDirPath(cwd) {
+  return join(cwd, ...RUNTIME_DIR_SEGMENTS);
+}
+function runtimeFilePath(cwd, pid) {
+  return join(runtimeDirPath(cwd), `${pid}.json`);
+}
+function processStartedAtIso(now = /* @__PURE__ */ new Date()) {
+  return new Date(now.getTime() - process.uptime() * 1e3).toISOString();
+}
+function writeRuntimeFile(cwd, snapshot) {
+  const dir = runtimeDirPath(cwd);
+  mkdirSync(dir, { recursive: true, mode: 448 });
+  const tmp = join(dir, `.tmp-${snapshot.pid}-${Math.random().toString(36).slice(2)}`);
+  writeFileSync(tmp, JSON.stringify(snapshot, null, 2) + "\n", { mode: 384 });
+  chmodSync(tmp, 384);
+  renameSync(tmp, runtimeFilePath(cwd, snapshot.pid));
+}
+function removeRuntimeFile(cwd, pid) {
+  rmSync(runtimeFilePath(cwd, pid), { force: true });
+}
+function readRuntimeFiles(cwd) {
+  const dir = runtimeDirPath(cwd);
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const name of names) {
+    if (name.startsWith(".") || !name.endsWith(".json"))
+      continue;
+    const path = join(dir, name);
+    try {
+      const snapshot = JSON.parse(readFileSync(path, "utf8"));
+      if (snapshot && typeof snapshot === "object")
+        out.push({ path, snapshot });
+    } catch {
+    }
+  }
+  return out;
+}
+function pidLiveness(pid) {
+  try {
+    process.kill(pid, 0);
+    return "alive";
+  } catch (error51) {
+    return error51?.code === "ESRCH" ? "dead" : "uncertain";
+  }
+}
+function pruneRuntimeFiles(cwd, now = /* @__PURE__ */ new Date()) {
+  for (const { path, snapshot } of readRuntimeFiles(cwd)) {
+    if (snapshot.pid === process.pid)
+      continue;
+    const expiresAt = Date.parse(snapshot.expiresAt || "");
+    const expired = !Number.isFinite(expiresAt) || expiresAt <= now.getTime();
+    if (expired || pidLiveness(snapshot.pid) === "dead")
+      rmSync(path, { force: true });
+  }
+}
+
+// ../client/dist/index.js
 var DEFAULT_API_BASE = "https://api.parle.sh";
 var DEFAULT_WAKE_BASE = DEFAULT_API_BASE;
 var DEFAULT_VERSION = "2026-07-07";
@@ -30999,7 +31067,7 @@ function parseKeyValueFile(text) {
 function readKeyValueFile(path) {
   if (!existsSync(path))
     return {};
-  return parseKeyValueFile(readFileSync(path, "utf8"));
+  return parseKeyValueFile(readFileSync2(path, "utf8"));
 }
 function firstConfigValue(name, sources, fallback) {
   for (const source of sources) {
@@ -31010,8 +31078,8 @@ function firstConfigValue(name, sources, fallback) {
   return { value: fallback, source: fallback === void 0 ? "missing" : "default" };
 }
 function resolveConfig(cwd = process.cwd(), env = process.env) {
-  const dotEnv = readKeyValueFile(join(cwd, ".env"));
-  const credentials = readKeyValueFile(join(cwd, ".parle", "credentials"));
+  const dotEnv = readKeyValueFile(join2(cwd, ".env"));
+  const credentials = readKeyValueFile(join2(cwd, ".parle", "credentials"));
   const sources = [
     { name: "env", values: env },
     { name: ".env", values: dotEnv },
@@ -31158,8 +31226,10 @@ var ParleAgentClient = class {
   env;
   now;
   randomUUID;
+  publishRuntime;
   runtime = {
     bootstrapped: false,
+    bootstrapState: "unstarted",
     sessionHandle: "",
     sessionAddress: null,
     agentSessionId: "",
@@ -31169,6 +31239,8 @@ var ParleAgentClient = class {
     cursor: 0
   };
   bootstrapGeneration = 0;
+  bootstrapInFlight = null;
+  consecutiveBootstrapFailures = 0;
   constructor(options = {}) {
     this.env = options.env || process.env;
     this.cwd = options.cwd ?? process.cwd();
@@ -31176,6 +31248,13 @@ var ParleAgentClient = class {
     this.fetchImpl = options.fetch || fetch;
     this.now = options.now || (() => /* @__PURE__ */ new Date());
     this.randomUUID = options.randomUUID || randomUUID;
+    this.publishRuntime = options.publishRuntime;
+    if (this.publishRuntime) {
+      try {
+        pruneRuntimeFiles(this.cwd, this.now());
+      } catch {
+      }
+    }
   }
   status() {
     return {
@@ -31211,9 +31290,9 @@ var ParleAgentClient = class {
     const current = this.cfg.agentToken?.value;
     if (!current)
       return void 0;
-    for (const rel of [".env", join(".parle", "credentials")]) {
+    for (const rel of [".env", join2(".parle", "credentials")]) {
       try {
-        const onDisk = readKeyValueFile(join(this.cwd, rel))["PARLE_ROOM_AGENT_TOKEN"];
+        const onDisk = readKeyValueFile(join2(this.cwd, rel))["PARLE_ROOM_AGENT_TOKEN"];
         if (onDisk === void 0 || onDisk === "")
           continue;
         if (onDisk === current)
@@ -31282,35 +31361,139 @@ var ParleAgentClient = class {
     }
     return json2;
   }
+  // Single-flight: concurrent callers (eager startup, racing first tool call,
+  // 401 rebootstrap) converge on one in-flight session mint instead of minting
+  // duplicates with last-writer-wins runtime state.
   async bootstrap(signal, preserveCursor = false) {
-    this.assertConfigured();
-    const previousCursor = this.runtime.cursor;
-    const body = {};
-    if (this.cfg.sessionAlias?.value)
-      body.alias = this.cfg.sessionAlias.value;
-    const session = await this.requestJson("/v/agent/sessions", { method: "POST", body, signal, rawResponse: true });
-    this.runtime.sessionHandle = String(session.session_credential || "");
-    this.runtime.sessionAddress = typeof session.address === "string" ? session.address : null;
-    this.runtime.agentSessionId = String(session.agent_session_id || "");
-    this.runtime.expiresAt = String(session.expires_at || "");
-    this.runtime.roomId = this.cfg.roomId.value;
-    const entry = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId.value)}/participants`, { method: "POST", session: true, signal });
-    this.runtime.participantId = String(entry.participant_id || "");
-    this.runtime.bootstrapped = true;
-    if (preserveCursor)
-      this.runtime.cursor = previousCursor;
-    else {
-      const projection = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId.value)}/projection?wait=0`, { session: true, signal });
-      this.runtime.cursor = typeof projection.watermark === "number" ? projection.watermark : 0;
-      if (typeof projection?.held_backlog?.held_count === "number")
-        this.runtime.heldBacklogCount = projection.held_backlog.held_count;
+    if (this.bootstrapInFlight)
+      return this.bootstrapInFlight;
+    const run = this.doBootstrap(signal, preserveCursor);
+    this.bootstrapInFlight = run;
+    try {
+      return await run;
+    } finally {
+      this.bootstrapInFlight = null;
     }
-    this.bootstrapGeneration += 1;
-    return { ...this.runtime };
+  }
+  async doBootstrap(signal, preserveCursor = false) {
+    this.runtime.bootstrapState = "starting";
+    this.publishRuntimeState();
+    try {
+      this.assertConfigured();
+      const previousCursor = this.runtime.cursor;
+      const body = {};
+      if (this.cfg.sessionAlias?.value)
+        body.alias = this.cfg.sessionAlias.value;
+      const session = await this.requestJson("/v/agent/sessions", { method: "POST", body, signal, rawResponse: true });
+      this.runtime.sessionHandle = String(session.session_credential || "");
+      this.runtime.sessionAddress = typeof session.address === "string" ? session.address : null;
+      this.runtime.agentSessionId = String(session.agent_session_id || "");
+      this.runtime.expiresAt = String(session.expires_at || "");
+      this.runtime.roomId = this.cfg.roomId.value;
+      const entry = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId.value)}/participants`, { method: "POST", session: true, signal });
+      this.runtime.participantId = String(entry.participant_id || "");
+      this.runtime.bootstrapped = true;
+      if (preserveCursor)
+        this.runtime.cursor = previousCursor;
+      else {
+        const projection = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId.value)}/projection?wait=0`, { session: true, signal });
+        this.runtime.cursor = typeof projection.watermark === "number" ? projection.watermark : 0;
+        if (typeof projection?.held_backlog?.held_count === "number")
+          this.runtime.heldBacklogCount = projection.held_backlog.held_count;
+      }
+      this.bootstrapGeneration += 1;
+      this.runtime.bootstrapState = "ready";
+      this.runtime.lastBootstrapError = void 0;
+      this.runtime.nextRetryAt = void 0;
+      this.consecutiveBootstrapFailures = 0;
+      this.publishRuntimeState();
+      return { ...this.runtime };
+    } catch (error51) {
+      this.consecutiveBootstrapFailures += 1;
+      const backoffMs = Math.min(6e4, 5e3 * 2 ** (this.consecutiveBootstrapFailures - 1));
+      this.runtime.bootstrapState = "failed";
+      this.runtime.lastBootstrapError = redactString(error51 instanceof Error ? error51.message : String(error51));
+      this.runtime.nextRetryAt = new Date(this.now().getTime() + backoffMs).toISOString();
+      this.publishRuntimeState();
+      throw error51;
+    }
   }
   async ensureBootstrapped(signal) {
     if (!this.runtime.bootstrapped || !this.runtime.sessionHandle)
       await this.bootstrap(signal);
+  }
+  sessionExpired() {
+    const expiry = this.runtime.expiresAt ? new Date(this.runtime.expiresAt) : null;
+    return expiry !== null && !Number.isNaN(expiry.getTime()) && expiry <= this.now();
+  }
+  // Non-throwing bootstrap for eager startup and status auto-connect. Returns
+  // whether a bootstrap was attempted. Skips when already live, unconfigured,
+  // or inside the failure backoff window (explicit tool calls like connect/read/
+  // send are user-paced and always retry; this path is the one that could hammer).
+  async ensureReadySafe(signal) {
+    if (this.runtime.bootstrapped && this.runtime.sessionHandle && !this.sessionExpired())
+      return false;
+    if (!this.cfg.roomId?.value || !this.cfg.agentToken?.value)
+      return false;
+    if (this.runtime.bootstrapState === "failed" && this.runtime.nextRetryAt && new Date(this.runtime.nextRetryAt) > this.now())
+      return false;
+    try {
+      await this.bootstrap(signal);
+    } catch {
+    }
+    return true;
+  }
+  publishRuntimeState() {
+    if (!this.publishRuntime)
+      return;
+    try {
+      writeRuntimeFile(this.cwd, {
+        schemaVersion: RUNTIME_SCHEMA_VERSION,
+        pid: process.pid,
+        processStartedAt: processStartedAtIso(this.now()),
+        state: this.runtime.bootstrapState === "ready" ? "ready" : this.runtime.bootstrapState === "failed" ? "failed" : "starting",
+        sessionAddress: this.runtime.sessionAddress,
+        // agent_session_id is room-visible operational metadata, not a credential
+        // (parlehq/parle#435); session_credential never leaves process memory.
+        agentSessionId: this.runtime.agentSessionId,
+        roomId: this.runtime.roomId || this.cfg.roomId?.value || "",
+        roomHandle: this.cfg.roomHandle?.value,
+        updatedAt: this.now().toISOString(),
+        expiresAt: this.runtime.expiresAt,
+        ...this.runtime.lastBootstrapError ? { lastError: this.runtime.lastBootstrapError } : {},
+        adapter: { name: this.publishRuntime.adapterName, version: this.publishRuntime.adapterVersion }
+      });
+    } catch {
+    }
+  }
+  discardRuntimeFile() {
+    if (!this.publishRuntime)
+      return;
+    try {
+      removeRuntimeFile(this.cwd, process.pid);
+    } catch {
+    }
+  }
+  async endSession(signal) {
+    const { agentSessionId, sessionHandle } = this.runtime;
+    try {
+      if (agentSessionId && sessionHandle) {
+        await this.requestJson(`/v/agent/sessions/${encodeURIComponent(agentSessionId)}/end`, { method: "POST", session: true, signal, timeoutMs: 2e3 });
+      }
+    } finally {
+      this.runtime = {
+        bootstrapped: false,
+        bootstrapState: "unstarted",
+        sessionHandle: "",
+        sessionAddress: null,
+        agentSessionId: "",
+        expiresAt: "",
+        participantId: "",
+        roomId: "",
+        cursor: 0
+      };
+      this.discardRuntimeFile();
+    }
   }
   // @parle-interpretation parlehq/parle#434
   // Deliberately factual until the core session lifecycle and delivery baseline
@@ -31333,9 +31516,7 @@ var ParleAgentClient = class {
     };
   }
   async connect(signal) {
-    const expiry = this.runtime.expiresAt ? new Date(this.runtime.expiresAt) : null;
-    const expired = expiry !== null && !Number.isNaN(expiry.getTime()) && expiry <= this.now();
-    const reused = this.runtime.bootstrapped && Boolean(this.runtime.sessionHandle) && !expired;
+    const reused = this.runtime.bootstrapped && Boolean(this.runtime.sessionHandle) && !this.sessionExpired();
     if (!reused)
       await this.bootstrap(signal);
     return this.connectionSummary(reused);
@@ -31437,13 +31618,22 @@ var sendSchema = {
   to: external_exports.string().optional(),
   idempotencyKey: external_exports.string().optional()
 };
+var statusSchema = {
+  inspect: external_exports.boolean().optional()
+};
 function createParleMcpServer(client = new ParleAgentClient()) {
   const server = new McpServer({ name: "parle-mcp-server", version: "0.1.0" });
   server.registerTool("parle_status", {
     title: "Parle Status",
-    description: "Show redacted Parle config provenance and runtime state.",
-    annotations: { readOnlyHint: true }
-  }, async () => toolResult(client.status()));
+    description: "Show redacted Parle config provenance and runtime state. When configured and not yet connected, this auto-connects the session first (single-flight, backoff-aware); pass inspect:true for a passive read with no network side effects.",
+    inputSchema: statusSchema,
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  }, async (params) => safeTool(async () => {
+    let bootstrapAttempted = false;
+    if (!params.inspect && typeof client.ensureReadySafe === "function") bootstrapAttempted = await client.ensureReadySafe();
+    const status = client.status();
+    return typeof status === "object" && status !== null ? { ...status, bootstrapAttempted } : { value: status, bootstrapAttempted };
+  }));
   server.registerTool("parle_setup", {
     title: "Parle Setup",
     description: "Diagnose missing Parle configuration without exposing secret values. Reports whether this process holds a session; parle_connect establishes one.",
@@ -31486,8 +31676,27 @@ function createParleMcpServer(client = new ParleAgentClient()) {
   return server;
 }
 async function runStdio() {
-  const server = createParleMcpServer();
+  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server" } });
+  const server = createParleMcpServer(client);
+  installLifecycleHandlers(client);
   await server.connect(new StdioServerTransport());
+  void client.ensureReadySafe();
+}
+function installLifecycleHandlers(client) {
+  let ending = false;
+  const shutdown = () => {
+    if (ending) return;
+    ending = true;
+    const timer = setTimeout(() => process.exit(0), 2e3);
+    void client.endSession().catch(() => {
+    }).finally(() => {
+      clearTimeout(timer);
+      process.exit(0);
+    });
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  process.on("exit", () => client.discardRuntimeFile());
 }
 function toolResult(value) {
   const structuredContent = typeof value === "object" && value !== null ? value : { value };

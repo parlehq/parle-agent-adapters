@@ -14,6 +14,11 @@ export type ParleMcpClientLike = {
   readInbox(params?: ReadParams): Promise<unknown>;
   affordances(): Promise<unknown>;
   send(params: SendParams): Promise<unknown>;
+  // Optional lifecycle surface (present on ParleAgentClient); guarded so
+  // minimal fake clients keep working.
+  ensureReadySafe?(signal?: AbortSignal): Promise<boolean>;
+  endSession?(signal?: AbortSignal): Promise<void>;
+  discardRuntimeFile?(): void;
 };
 
 const WAIT_TEXT = "waitSeconds is a bounded single wait for an explicit tool call. Do not loop on it as a watcher. Responsive delivery uses /v/agent/wake SSE, then responsive-delivery?wait=0.";
@@ -36,14 +41,24 @@ const sendSchema = {
   idempotencyKey: z.string().optional(),
 };
 
+const statusSchema = {
+  inspect: z.boolean().optional(),
+};
+
 export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgentClient()) {
   const server = new McpServer({ name: "parle-mcp-server", version: "0.1.0" });
 
   server.registerTool("parle_status", {
     title: "Parle Status",
-    description: "Show redacted Parle config provenance and runtime state.",
-    annotations: { readOnlyHint: true },
-  }, async () => toolResult(client.status()));
+    description: "Show redacted Parle config provenance and runtime state. When configured and not yet connected, this auto-connects the session first (single-flight, backoff-aware); pass inspect:true for a passive read with no network side effects.",
+    inputSchema: statusSchema,
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (params) => safeTool(async () => {
+    let bootstrapAttempted = false;
+    if (!params.inspect && typeof client.ensureReadySafe === "function") bootstrapAttempted = await client.ensureReadySafe();
+    const status = client.status();
+    return typeof status === "object" && status !== null ? { ...status, bootstrapAttempted } : { value: status, bootstrapAttempted };
+  }));
 
   server.registerTool("parle_setup", {
     title: "Parle Setup",
@@ -95,8 +110,33 @@ export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgent
 }
 
 export async function runStdio() {
-  const server = createParleMcpServer();
+  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server" } });
+  const server = createParleMcpServer(client);
+  installLifecycleHandlers(client);
   await server.connect(new StdioServerTransport());
+  // Eager background bootstrap: the session exists (and the runtime snapshot is
+  // published) before the first tool call. No-op when unconfigured; failures
+  // are recorded on runtime state and retried per the backoff policy.
+  void client.ensureReadySafe();
+}
+
+function installLifecycleHandlers(client: ParleAgentClient) {
+  let ending = false;
+  const shutdown = () => {
+    if (ending) return;
+    ending = true;
+    const timer = setTimeout(() => process.exit(0), 2000);
+    void client.endSession().catch(() => {}).finally(() => {
+      clearTimeout(timer);
+      process.exit(0);
+    });
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  // exit allows no async work; drop the runtime file so readers never see a
+  // dead-pid snapshot longer than necessary. Session end over the network is
+  // the SIGINT/SIGTERM path's job.
+  process.on("exit", () => client.discardRuntimeFile());
 }
 
 function toolResult(value: unknown): any {
