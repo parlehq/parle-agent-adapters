@@ -44,6 +44,8 @@ type ParleConfig = {
   agentToken?: ConfigValue;
   agentTokenId?: ConfigValue;
   agentId?: ConfigValue;
+  principalHandle?: ConfigValue;
+  agentHandle?: ConfigValue;
   sessionCookie?: ConfigValue;
   sessionAlias?: ConfigValue;
   watchEnabled: ConfigValue;
@@ -57,6 +59,8 @@ type WatcherErrorClass = "network" | "timeout" | "http_4xx" | "http_5xx" | "http
 type RuntimeState = {
   sessionHandle?: string;
   sessionAddress?: string | null;
+  sessionAlias?: string;
+  sessionGeneration?: number;
   agentSessionId?: string;
   expiresAt?: string;
   participantId?: string;
@@ -205,13 +209,15 @@ function resolveConfig(cwd: string): ParleConfig {
     agentToken: pick("PARLE_ROOM_AGENT_TOKEN", undefined, true),
     agentTokenId: pick("PARLE_AGENT_TOKEN_ID", undefined),
     agentId: pick("PARLE_AGENT_ID", undefined),
+    principalHandle: pick("PARLE_PRINCIPAL_HANDLE", undefined),
+    agentHandle: pick("PARLE_AGENT_HANDLE", undefined),
     sessionCookie: pick("PARLE_SESSION_COOKIE", undefined, true),
     sessionAlias: pick("PARLE_SESSION_ALIAS", undefined),
     watchEnabled: pick("PARLE_WATCH_ENABLED", "1"),
     wakeBase: pick("PARLE_WAKE_BASE", undefined),
     warnings,
   };
-  for (const value of [cfg.apiBase, cfg.wakeBase, cfg.version, cfg.roomId, cfg.roomHandle, cfg.agentToken, cfg.agentTokenId, cfg.agentId, cfg.sessionCookie, cfg.sessionAlias, cfg.watchEnabled]) {
+  for (const value of [cfg.apiBase, cfg.wakeBase, cfg.version, cfg.roomId, cfg.roomHandle, cfg.agentToken, cfg.agentTokenId, cfg.agentId, cfg.principalHandle, cfg.agentHandle, cfg.sessionCookie, cfg.sessionAlias, cfg.watchEnabled]) {
     if (value?.warning) cfg.warnings.push(value.warning);
   }
   // Process env is a startup snapshot; project .env is regenerated on rotation.
@@ -842,6 +848,15 @@ async function consumeWakeStream(pi: any, ctx: any, cfg: ParleConfig, signal: Ab
   }
 }
 
+function sessionRouteAddress(cfg: ParleConfig, session: any): string | null {
+  const alias = typeof session?.alias === "string" && session.alias ? session.alias : cfg.sessionAlias?.value;
+  const handle = typeof session?.session_handle === "string" && session.session_handle ? session.session_handle : undefined;
+  const route = alias || handle;
+  if (route && cfg.principalHandle?.value && cfg.agentHandle?.value) return `@${cfg.principalHandle.value}.${cfg.agentHandle.value}.${route}`;
+  if (typeof session?.address === "string" && session.address) return session.address;
+  return null;
+}
+
 async function bootstrap(ctx: any, cfg: ParleConfig, signal?: AbortSignal, preserveCursor = false) {
   assertRuntimeConfig(cfg);
   const previousCursor = runtime.cursor;
@@ -849,7 +864,9 @@ async function bootstrap(ctx: any, cfg: ParleConfig, signal?: AbortSignal, prese
   if (cfg.sessionAlias?.value) sessionBody.alias = cfg.sessionAlias.value;
   const session = await requestJson(cfg, "/v/agent/sessions", { method: "POST", body: sessionBody, signal });
   runtime.sessionHandle = String(session.session_credential || "");
-  runtime.sessionAddress = typeof session.address === "string" ? session.address : null;
+  runtime.sessionAlias = typeof session.alias === "string" && session.alias ? session.alias : cfg.sessionAlias?.value;
+  runtime.sessionGeneration = typeof session.generation === "number" ? session.generation : undefined;
+  runtime.sessionAddress = sessionRouteAddress(cfg, session);
   runtime.agentSessionId = String(session.agent_session_id || "");
   runtime.expiresAt = String(session.expires_at || "");
   runtime.roomId = cfg.roomId!.value;
@@ -1237,6 +1254,8 @@ function statusDetails(ctx: any) {
     agentToken: redactedValue(cfg.agentToken),
     agentTokenId: redactedValue(cfg.agentTokenId),
     agentId: redactedValue(cfg.agentId),
+    principalHandle: redactedValue(cfg.principalHandle),
+    agentHandle: redactedValue(cfg.agentHandle),
     sessionCookie: redactedValue(cfg.sessionCookie),
     sessionAlias: redactedValue(cfg.sessionAlias),
     watchEnabled: redactedValue(cfg.watchEnabled),
@@ -1244,6 +1263,8 @@ function statusDetails(ctx: any) {
     runtime: {
       bootstrapped: runtime.bootstrapped,
       sessionAddress: runtime.sessionAddress,
+      sessionAlias: runtime.sessionAlias,
+      sessionGeneration: runtime.sessionGeneration,
       agentSessionId: runtime.agentSessionId,
       expiresAt: runtime.expiresAt,
       participantId: runtime.participantId,

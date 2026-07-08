@@ -21,10 +21,12 @@ function installHarness(cwd) {
     registerTool(spec) { tools[spec.name] = spec; },
   };
   mod.default(pi);
-  const ctx = { cwd, ui: { setStatus() {}, notify() {} } };
+  const statuses = [];
+  const ctx = { cwd, ui: { setStatus(id, label) { statuses.push({ id, label }); }, notify() {} } };
   return {
     tools,
     commands,
+    statuses,
     ctx,
     cwd,
     call(name, params = {}) {
@@ -81,6 +83,26 @@ test("status bootstraps and redacts session handle", async () => {
   const status = await harness.call("parle_status");
   assert.equal(status.details.runtime.sessionHandle, "<redacted>");
   assert.equal(status.details.runtime.sessionAddress, "@p.a.raw-session");
+});
+
+test("footer prefers alias route when session uses an alias", async () => {
+  const cwd = tempProject("PARLE_ROOM_ID=room-1\nPARLE_ROOM_AGENT_TOKEN=token-1\nPARLE_PRINCIPAL_HANDLE=p\nPARLE_AGENT_HANDLE=a\nPARLE_SESSION_ALIAS=parle-landing\nPARLE_WATCH_ENABLED=0\n");
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u.endsWith("/v/agent/sessions")) {
+      assert.equal(JSON.parse(String(init.body)).alias, "parle-landing");
+      return new Response(JSON.stringify({ agent_session_id: "as-alias", session_credential: "parle_ses_alias-session", session_handle: "raw-session", alias: "parle-landing", generation: 2, expires_at: "2026-07-04T00:00:00Z", address: "@p.a.raw-session" }), { status: 201 });
+    }
+    if (u.endsWith("/participants")) return new Response(JSON.stringify({ participant_id: "p-alias", room_id: "room-1", agent_session_id: "as-alias" }), { status: 201 });
+    if (u.includes("/projection")) return new Response(JSON.stringify({ watermark: 7, messages: [] }), { status: 200 });
+    throw new Error("unexpected " + u);
+  };
+  const harness = installHarness(cwd);
+  const status = await harness.call("parle_status");
+  assert.equal(status.details.runtime.sessionAddress, "@p.a.parle-landing");
+  assert.equal(status.details.runtime.sessionAlias, "parle-landing");
+  assert.equal(status.details.runtime.sessionGeneration, 2);
+  assert.equal(harness.statuses.at(-1).label, "parle ✓ @p.a.parle-landing");
 });
 
 test("status starts watcher after late lazy bootstrap", async () => {
