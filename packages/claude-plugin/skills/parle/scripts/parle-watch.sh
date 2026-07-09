@@ -20,9 +20,11 @@
 # is set, each cycle also checks the local .parle/runtime/*.json snapshots
 # the adapters publish. Own-snapshot evidence is classified before absence
 # counts for anything: a snapshot carrying this id that is expired (or within
-# the 30s guard band) or whose writer pid is dead is AFFIRMATIVE evidence the
-# session is gone and exits 3 regardless of history; one that is present but
-# not ready (bootstrap retry or failure in progress) holds as inconclusive.
+# the 30s guard band) or whose writer pid is dead or verifiably recycled
+# (process start time mismatches processStartedAt, checked via /proc then
+# ps etime where available) is AFFIRMATIVE evidence the session is gone and
+# exits 3 regardless of history; one that is present but not ready (bootstrap
+# retry or failure in progress) holds as inconclusive.
 # Plain absence is era-gated: only after this watch has itself seen the
 # session live in a snapshot does present-then-absent (for two consecutive
 # checks) exit 3. A session id that was NEVER present is inconclusive -- host
@@ -103,7 +105,7 @@ session_liveness() {
   [ "${PARLE_WATCH_SESSION_LIVENESS:-1}" = "0" ] && { echo LIVE; return; }
   [ -d ./.parle/runtime ] || { echo UNKNOWN; return; }
   python3 - "$me" <<'PY' 2>/dev/null || echo UNKNOWN
-import calendar, glob, json, os, re, sys, time
+import calendar, glob, json, os, re, subprocess, sys, time
 
 me = sys.argv[1]
 now = time.time()
@@ -112,12 +114,48 @@ mine = []
 # ISO-8601 UTC as written by JS toISOString(); parsed portably because the
 # host python3 can be as old as 3.6 (no datetime.fromisoformat).
 ISO_UTC = re.compile(r"^(\d{4}-\d{2}-\d{2})[Tt](\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:[Zz]|\+00:00)$")
+# Matches the statusline helper's START_TIME_TOLERANCE_MS.
+START_TOLERANCE = 15
 
-def expiry_epoch(snap):
-    match = ISO_UTC.match(str(snap.get("expiresAt", "")))
+def iso_epoch(raw):
+    match = ISO_UTC.match(str(raw))
     if not match:
         return None
     return calendar.timegm(time.strptime(match.group(1) + " " + match.group(2), "%Y-%m-%d %H:%M:%S"))
+
+def pid_start_epoch(pid):
+    # PID-reuse hardening: best-effort epoch the process started, or None when
+    # process inspection is unavailable (some sandboxes deny ps and have no
+    # /proc; the check degrades to pid-liveness-only there). Linux /proc first,
+    # then ps etime -- locale- and timezone-free, mirroring parle-statusline.
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            stat = f.read()
+        fields = stat[stat.rindex(")") + 2:].split()
+        ticks = float(fields[19])
+        with open("/proc/stat") as f:
+            for line in f:
+                if line.startswith("btime "):
+                    return int(line.split()[1]) + ticks / os.sysconf("SC_CLK_TCK")
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["ps", "-o", "etime=", "-p", str(pid)],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+        text = out.stdout.decode("utf-8", "replace").strip()
+        if out.returncode != 0 or not text:
+            return None
+        # etime format: [[dd-]hh:]mm:ss
+        if "-" in text:
+            days, clock = text.split("-", 1)
+        else:
+            days, clock = "0", text
+        seconds = 0
+        for part in clock.split(":"):
+            seconds = seconds * 60 + int(part)
+        return now - (seconds + int(days) * 86400)
+    except Exception:
+        return None
 
 def pid_alive(snap):
     pid = snap.get("pid")
@@ -129,6 +167,13 @@ def pid_alive(snap):
         return False
     except Exception:
         pass
+    # A verifiable start-time mismatch means the pid was recycled: the writer
+    # is gone even though something answers kill(pid, 0).
+    claimed = iso_epoch(snap.get("processStartedAt", ""))
+    if claimed is not None:
+        actual = pid_start_epoch(pid)
+        if actual is not None and abs(actual - claimed) > START_TOLERANCE:
+            return False
     return True
 
 for path in glob.glob("./.parle/runtime/*.json"):
@@ -139,11 +184,12 @@ for path in glob.glob("./.parle/runtime/*.json"):
         continue
     if not isinstance(snap, dict) or snap.get("schemaVersion") != 1:
         continue
-    expires = expiry_epoch(snap)
-    alive = pid_alive(snap)
+    expires = iso_epoch(snap.get("expiresAt", ""))
     if snap.get("agentSessionId") == me:
-        # Own-file evidence beats absence: expiry and a dead writer pid are
-        # affirmative "gone"; anything else non-live holds as inconclusive.
+        # Own-file evidence beats absence: expiry and a dead (or recycled)
+        # writer pid are affirmative "gone"; anything else non-live holds as
+        # inconclusive.
+        alive = pid_alive(snap)
         if expires is not None and expires <= now + 30:
             mine.append("MINE_EXPIRED")
         elif alive is False:
@@ -158,7 +204,7 @@ for path in glob.glob("./.parle/runtime/*.json"):
         continue
     if expires is None or expires <= now + 30:
         continue
-    if not alive:
+    if pid_alive(snap) is not True:
         continue
     sibling_live += 1
 
@@ -178,11 +224,48 @@ PY
 liveness_forensics() {
   echo "parle-watch forensics: watched=$me verdict=$1" >&2
   python3 - "$me" <<'PY' >&2 2>/dev/null || echo "parle-watch forensics: unavailable (python3 failed)" >&2
-import calendar, glob, json, os, re, sys, time
+import calendar, glob, json, os, re, subprocess, sys, time
 
 me = sys.argv[1]
 now = time.time()
 ISO_UTC = re.compile(r"^(\d{4}-\d{2}-\d{2})[Tt](\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:[Zz]|\+00:00)$")
+START_TOLERANCE = 15
+
+def iso_epoch(raw):
+    match = ISO_UTC.match(str(raw))
+    if not match:
+        return None
+    return calendar.timegm(time.strptime(match.group(1) + " " + match.group(2), "%Y-%m-%d %H:%M:%S"))
+
+def pid_start_epoch(pid):
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            stat = f.read()
+        fields = stat[stat.rindex(")") + 2:].split()
+        ticks = float(fields[19])
+        with open("/proc/stat") as f:
+            for line in f:
+                if line.startswith("btime "):
+                    return int(line.split()[1]) + ticks / os.sysconf("SC_CLK_TCK")
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["ps", "-o", "etime=", "-p", str(pid)],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+        text = out.stdout.decode("utf-8", "replace").strip()
+        if out.returncode != 0 or not text:
+            return None
+        if "-" in text:
+            days, clock = text.split("-", 1)
+        else:
+            days, clock = "0", text
+        seconds = 0
+        for part in clock.split(":"):
+            seconds = seconds * 60 + int(part)
+        return now - (seconds + int(days) * 86400)
+    except Exception:
+        return None
+
 files = sorted(glob.glob("./.parle/runtime/*.json"))
 if not files:
     print("  (no files in ./.parle/runtime)")
@@ -205,13 +288,25 @@ for path in files:
     except Exception:
         alive = "uncertain"
     raw = str(snap.get("expiresAt", ""))
-    match = ISO_UTC.match(raw)
-    ttl = None
-    if match:
-        ttl = int(calendar.timegm(time.strptime(match.group(1) + " " + match.group(2), "%Y-%m-%d %H:%M:%S")) - now)
-    print("  %s schema=%s state=%s pid=%s(%s) expiresAt=%s ttl=%s mine=%s" % (
+    expires = iso_epoch(raw)
+    ttl = int(expires - now) if expires is not None else None
+    started = str(snap.get("processStartedAt", "")) or "?"
+    claimed = iso_epoch(started)
+    if claimed is None:
+        startcheck = "unclaimed"
+    elif alive != "alive":
+        startcheck = "n/a"
+    else:
+        actual = pid_start_epoch(pid) if isinstance(pid, int) and pid > 0 else None
+        if actual is None:
+            startcheck = "unavailable"
+        elif abs(actual - claimed) > START_TOLERANCE:
+            startcheck = "mismatched"
+        else:
+            startcheck = "matched"
+    print("  %s schema=%s state=%s pid=%s(%s) expiresAt=%s ttl=%s started=%s startcheck=%s mine=%s" % (
         path, snap.get("schemaVersion"), snap.get("state"), pid, alive,
-        raw or "?", "%ds" % ttl if ttl is not None else "?",
+        raw or "?", "%ds" % ttl if ttl is not None else "?", started, startcheck,
         "yes" if snap.get("agentSessionId") == me else "no"))
 PY
 }

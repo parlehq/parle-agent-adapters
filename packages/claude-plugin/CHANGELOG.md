@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.5.15 (2026-07-09)
+
+Watcher liveness detects recycled writer pids via process-start-time verification (adapters#22 residual; script-only, no MCP bundle change).
+
+- The e0772a2 review flagged the remaining LIVE-direction blind spot: a SIGKILL'd server whose pid is recycled by another process keeps its ready, unexpired snapshot classified LIVE (`kill(pid, 0)` succeeds), silently holding a stale watch for up to the remaining TTL -- exactly the failure the check exists to prevent. The liveness check now cross-verifies the snapshot's `processStartedAt` against the actual process start time, via `/proc/<pid>/stat` + btime on Linux, then `ps -o etime=` (locale- and timezone-free, mirroring the statusline helper and its 15s tolerance). A verifiable mismatch means the pid was recycled: the own snapshot classifies as gone (pid-dead exit path) and sibling snapshots stop counting as live. Where process inspection is unavailable (some sandboxes deny `ps` and have no `/proc`), the check degrades to pid-liveness-only, the pre-0.5.15 behavior.
+- Forensics lines gain `started=` and `startcheck=matched|mismatched|unavailable|unclaimed|n/a` so a recycled-pid verdict is visible in the evidence dump.
+- Client `isLiveRuntimeSnapshot`/prune intentionally unchanged (uncertain-counts-as-alive posture, deferred per review): the watch is the correctness surface for responsive delivery; display ghosts stay bounded by `expiresAt`.
+
 ## 0.5.14 (2026-07-09)
 
 Watcher liveness classifies own-snapshot evidence and dumps forensics before every exit 3 (adapters#22 follow-up; script-only, no MCP bundle change).

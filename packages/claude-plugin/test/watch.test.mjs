@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,18 @@ const script = resolve(root, "skills/parle/scripts/parle-watch.sh");
 // The liveness check shells out to python3 and probes pids with kill(pid, 0);
 // skip cleanly where the sandbox denies either.
 const havePython = spawnSync("python3", ["-c", "import os; os.kill(os.getpid(), 0)"]).status === 0;
+
+// PID-reuse hardening verifies process start times via /proc or ps etime;
+// tests for it self-skip where neither is available (hardened sandboxes).
+function canVerifyStart() {
+  try {
+    if (execFileSync("ps", ["-o", "etime=", "-p", String(process.pid)], { encoding: "utf8" }).trim()) return true;
+  } catch {
+    // fall through to /proc
+  }
+  return existsSync(`/proc/${process.pid}/stat`);
+}
+const haveStartVerify = canVerifyStart();
 
 function stubServer(body) {
   return new Promise((resolveServer) => {
@@ -30,7 +42,11 @@ function writeSnapshot(cwd, agentSessionId, overrides = {}) {
   const snapshot = {
     schemaVersion: 1,
     pid: process.pid,
-    processStartedAt: new Date().toISOString(),
+    // The real start of this process, as the client writes it: a fabricated
+    // "now" would trip the PID-reuse start-time check once the suite has run
+    // longer than the tolerance. Snapshots for other pids (process.ppid)
+    // override this with undefined so the unverifiable claim is omitted.
+    processStartedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
     state: "ready",
     sessionAddress: "@p.a.s1",
     agentSessionId,
@@ -95,7 +111,7 @@ test("watch holds with a note when the watched session was never present (era ga
 test("watch exits 3 when its session was present and then removed", { skip: !havePython && "python3/kill unavailable" }, async () => {
   const cwd = mkdtempSync(join(tmpdir(), "parle-watch-"));
   writeSnapshot(cwd, "session-mine");
-  writeSnapshot(cwd, "session-other", { pid: process.ppid });
+  writeSnapshot(cwd, "session-other", { pid: process.ppid, processStartedAt: undefined });
   const server = await stubServer({ messages: [], watermark: 1 });
   try {
     const watch = runWatch(cwd, `http://127.0.0.1:${server.address().port}`, ["1", "session-mine"]);
@@ -118,7 +134,7 @@ test("an expired own-session snapshot exits 3 as scheduled expiry, era gate not 
   // The snapshot itself proves the session is gone (past expiresAt), so the
   // watch exits affirmatively even though it never saw the session live.
   writeSnapshot(cwd, "session-mine", { expiresAt: new Date(Date.now() - 1000).toISOString(), pid: 99999999 });
-  writeSnapshot(cwd, "session-other", { pid: process.ppid });
+  writeSnapshot(cwd, "session-other", { pid: process.ppid, processStartedAt: undefined });
   const server = await stubServer({ messages: [], watermark: 1 });
   try {
     const watch = runWatch(cwd, `http://127.0.0.1:${server.address().port}`, ["1", "session-mine"]);
@@ -149,12 +165,31 @@ test("a dead writer pid on the own snapshot exits 3 even with no siblings", { sk
   }
 });
 
+test("a recycled writer pid (start-time mismatch) exits 3 as pid-dead", { skip: (!havePython && "python3/kill unavailable") || (!haveStartVerify && "no /proc or ps for start-time verification") }, async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "parle-watch-"));
+  // The pid answers kill(pid, 0) (it is this test process), but the snapshot
+  // claims a writer that started long ago: a verifiable start-time mismatch
+  // means the pid was recycled and the real writer is gone.
+  writeSnapshot(cwd, "session-mine", { processStartedAt: new Date(Date.now() - 7 * 86_400_000).toISOString() });
+  const server = await stubServer({ messages: [], watermark: 1 });
+  try {
+    const watch = runWatch(cwd, `http://127.0.0.1:${server.address().port}`, ["1", "session-mine"]);
+    const code = await watch.exited;
+    assert.equal(code, 3);
+    assert.match(watch.err(), /no longer running/);
+    assert.match(watch.err(), /verdict=MINE_PIDDEAD/);
+    assert.match(watch.err(), /startcheck=mismatched/);
+  } finally {
+    server.close();
+  }
+});
+
 test("a non-ready own snapshot holds with a one-time note while the host retries", { skip: !havePython && "python3/kill unavailable" }, async () => {
   const cwd = mkdtempSync(join(tmpdir(), "parle-watch-"));
   // Bootstrap retry in progress: own snapshot present but state != ready must
   // hold as inconclusive even while a live sibling would otherwise force DEAD.
   writeSnapshot(cwd, "session-mine", { state: "starting" });
-  writeSnapshot(cwd, "session-other", { pid: process.ppid });
+  writeSnapshot(cwd, "session-other", { pid: process.ppid, processStartedAt: undefined });
   const server = await stubServer({ messages: [], watermark: 1 });
   try {
     const watch = runWatch(cwd, `http://127.0.0.1:${server.address().port}`, ["1", "session-mine"]);
