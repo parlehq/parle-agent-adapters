@@ -105,24 +105,63 @@ test("watch exits 3 when its session was present and then removed", { skip: !hav
     assert.equal(code, 3);
     assert.match(watch.err(), /was live in this host's runtime snapshots and is now gone/);
     assert.match(watch.err(), /parle_connect/);
+    assert.match(watch.err(), /remaining TTL/);
+    assert.match(watch.err(), /parle-watch forensics: watched=session-mine verdict=DEAD/);
+    assert.match(watch.err(), /mine=no/);
   } finally {
     server.close();
   }
 });
 
-test("an expired own-session snapshot never counts as seen-live, so the watch holds", { skip: !havePython && "python3/kill unavailable" }, async () => {
+test("an expired own-session snapshot exits 3 as scheduled expiry, era gate not required", { skip: !havePython && "python3/kill unavailable" }, async () => {
   const cwd = mkdtempSync(join(tmpdir(), "parle-watch-"));
-  // An already-expired snapshot of the watched session must not satisfy the
-  // era gate: the watch never saw the session live, so a sibling live snapshot
-  // yields the inconclusive hold, not exit 3.
+  // The snapshot itself proves the session is gone (past expiresAt), so the
+  // watch exits affirmatively even though it never saw the session live.
   writeSnapshot(cwd, "session-mine", { expiresAt: new Date(Date.now() - 1000).toISOString(), pid: 99999999 });
+  writeSnapshot(cwd, "session-other", { pid: process.ppid });
+  const server = await stubServer({ messages: [], watermark: 1 });
+  try {
+    const watch = runWatch(cwd, `http://127.0.0.1:${server.address().port}`, ["1", "session-mine"]);
+    const code = await watch.exited;
+    assert.equal(code, 3);
+    assert.match(watch.err(), /expected pre-expiry rollover/);
+    assert.match(watch.err(), /parle-watch forensics: watched=session-mine verdict=MINE_EXPIRED/);
+    assert.match(watch.err(), /mine=yes/);
+  } finally {
+    server.close();
+  }
+});
+
+test("a dead writer pid on the own snapshot exits 3 even with no siblings", { skip: !havePython && "python3/kill unavailable" }, async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "parle-watch-"));
+  // Unexpired and ready, but the publishing process is gone: affirmative exit,
+  // no sibling snapshot needed and no prior live observation required.
+  writeSnapshot(cwd, "session-mine", { pid: 99999999 });
+  const server = await stubServer({ messages: [], watermark: 1 });
+  try {
+    const watch = runWatch(cwd, `http://127.0.0.1:${server.address().port}`, ["1", "session-mine"]);
+    const code = await watch.exited;
+    assert.equal(code, 3);
+    assert.match(watch.err(), /no longer running/);
+    assert.match(watch.err(), /verdict=MINE_PIDDEAD/);
+  } finally {
+    server.close();
+  }
+});
+
+test("a non-ready own snapshot holds with a one-time note while the host retries", { skip: !havePython && "python3/kill unavailable" }, async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "parle-watch-"));
+  // Bootstrap retry in progress: own snapshot present but state != ready must
+  // hold as inconclusive even while a live sibling would otherwise force DEAD.
+  writeSnapshot(cwd, "session-mine", { state: "starting" });
   writeSnapshot(cwd, "session-other", { pid: process.ppid });
   const server = await stubServer({ messages: [], watermark: 1 });
   try {
     const watch = runWatch(cwd, `http://127.0.0.1:${server.address().port}`, ["1", "session-mine"]);
     await sleep(1200);
     assert.equal(watch.child.exitCode, null, `watch exited early: ${watch.err()}${watch.out()}`);
-    assert.match(watch.err(), /has never appeared/);
+    assert.match(watch.err(), /not in the ready state/);
+    assert.equal(watch.err().split("not in the ready state").length, 2, "note must print exactly once");
     watch.child.kill("SIGKILL");
     await watch.exited;
   } finally {
