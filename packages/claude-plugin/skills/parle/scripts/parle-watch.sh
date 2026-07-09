@@ -18,19 +18,21 @@
 # token alone, so the server cannot tell this script that the session it
 # filters on has died (host reload, session end). When my_agent_session_id
 # is set, each cycle also checks the local .parle/runtime/*.json snapshots
-# the adapters publish: if live snapshots exist and none carries this id for
-# two consecutive checks, the session is gone and the script exits 3 instead
-# of holding a watch that can never match its directs again. No snapshots at
-# all is indeterminate (direct-HTTP sessions publish none) and the watch holds.
-# Set PARLE_WATCH_SESSION_LIVENESS=0 to disable the check when watching a
-# session that has no runtime snapshot while another adapter runs in the
-# same directory.
+# the adapters publish. The DEAD verdict is era-gated: only after this watch
+# has itself seen the session live in a snapshot does present-then-absent
+# (for two consecutive checks) exit 3. A session id that was NEVER present
+# is inconclusive -- host predating snapshot publishing, another cwd, or a
+# missing file for a live server (observed in the field, adapters#22) -- so
+# the watch notes it once on stderr and keeps holding. No snapshots at all
+# is likewise indeterminate (direct-HTTP sessions publish none). Set
+# PARLE_WATCH_SESSION_LIVENESS=0 to disable the check entirely.
 #
 # Needs: PARLE_API_BASE, PARLE_ROOM_ID, PARLE_ROOM_AGENT_TOKEN
 # Exit:  0 = relevant activity past since_seq, 2 = terminal or repeated
-#        failures, 3 = my_agent_session_id is no longer live on this host
-#        (reconnect with parle_connect and arm a fresh watch; do not re-arm
-#        with the old id or watermark)
+#        failures, 3 = my_agent_session_id was live on this host and is now
+#        gone (reconnect with parle_connect and arm a fresh watch; do not
+#        re-arm with the old id or watermark; if parle_connect says the
+#        session is still alive, re-arm with PARLE_WATCH_SESSION_LIVENESS=0)
 #
 # Config self-loads from the same sources and precedence as the adapters
 # client: process env first, then ./.env, then ./.parle/credentials (relative
@@ -127,18 +129,34 @@ PY
 
 fails=0
 dead_liveness=0
+# Era gate: only trust a DEAD verdict after this watch has itself observed the
+# session live in the snapshots (present-then-absent). A session id that was
+# NEVER present is inconclusive -- the host may predate snapshot publishing,
+# run in another cwd, or its live server's file may be missing (observed in
+# the field, adapters#22) -- so the watch holds and says why once.
+seen_live=0
+noted_never_present=0
 while :; do
   liveness_state=$(session_liveness)
+  if [ "$liveness_state" = "LIVE" ] && [ -n "$me" ]; then seen_live=1; fi
   if [ "$liveness_state" = "DEAD" ]; then
-    dead_liveness=$((dead_liveness + 1))
-    if [ "$dead_liveness" -ge 2 ]; then
-      echo "Parle stopped: agent session $me is no longer live on this host (host process reloaded, session ended, or the prior runtime snapshot expired within the safety window). Reconnect with parle_connect, then arm a fresh watch with the returned cursor and agentSessionId. Do not re-arm with this session id or watermark." >&2
-      exit 3
+    if [ "$seen_live" != "1" ]; then
+      if [ "$noted_never_present" = "0" ]; then
+        noted_never_present=1
+        echo "Parle note: agent session $me has never appeared in ./.parle/runtime snapshots, so its absence is inconclusive and this watch keeps holding. If parle_connect reports a different live session id, re-arm with that id and cursor; if it reports this session alive, the snapshot is missing and PARLE_WATCH_SESSION_LIVENESS=0 silences this check until the host reloads." >&2
+      fi
+      dead_liveness=0
+    else
+      dead_liveness=$((dead_liveness + 1))
+      if [ "$dead_liveness" -ge 2 ]; then
+        echo "Parle stopped: agent session $me was live in this host's runtime snapshots and is now gone (host process reloaded, session ended, or expired). Reconnect with parle_connect, then arm a fresh watch with the returned cursor and agentSessionId. Do not re-arm with this session id or watermark. If parle_connect reports this same session alive, treat this as a false verdict and re-arm with PARLE_WATCH_SESSION_LIVENESS=0." >&2
+        exit 3
+      fi
+      sleep 1
+      continue
     fi
-    sleep 1
-    continue
   fi
-  dead_liveness=0
+  if [ "$liveness_state" != "DEAD" ]; then dead_liveness=0; fi
   tmp=$(mktemp "${TMPDIR:-/tmp}/parle-watch.XXXXXX") || exit 2
   status=$(curl -sS --max-time 40 -o "$tmp" -w '%{http_code}' \
     "$PARLE_API_BASE/v/rooms/$PARLE_ROOM_ID/projection?since_seq=$since&wait=25" \

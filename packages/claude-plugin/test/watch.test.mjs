@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,33 +74,57 @@ async function assertStillWatching(watch) {
   await watch.exited;
 }
 
-test("watch exits 3 when live snapshots exist without the watched session", { skip: !havePython && "python3/kill unavailable" }, async () => {
+test("watch holds with a note when the watched session was never present (era gate)", { skip: !havePython && "python3/kill unavailable" }, async () => {
   const cwd = mkdtempSync(join(tmpdir(), "parle-watch-"));
   writeSnapshot(cwd, "session-other");
   const server = await stubServer({ messages: [], watermark: 1 });
   try {
     const watch = runWatch(cwd, `http://127.0.0.1:${server.address().port}`, ["1", "session-mine"]);
+    await sleep(1200);
+    assert.equal(watch.child.exitCode, null, `watch exited early: ${watch.err()}${watch.out()}`);
+    assert.match(watch.err(), /has never appeared/);
+    assert.match(watch.err(), /PARLE_WATCH_SESSION_LIVENESS=0/);
+    assert.equal(watch.err().split("has never appeared").length, 2, "note must print exactly once");
+    watch.child.kill("SIGKILL");
+    await watch.exited;
+  } finally {
+    server.close();
+  }
+});
+
+test("watch exits 3 when its session was present and then removed", { skip: !havePython && "python3/kill unavailable" }, async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "parle-watch-"));
+  writeSnapshot(cwd, "session-mine");
+  writeSnapshot(cwd, "session-other", { pid: process.ppid });
+  const server = await stubServer({ messages: [], watermark: 1 });
+  try {
+    const watch = runWatch(cwd, `http://127.0.0.1:${server.address().port}`, ["1", "session-mine"]);
+    await sleep(400);
+    rmSync(join(cwd, ".parle", "runtime", `${process.pid}.json`));
     const code = await watch.exited;
     assert.equal(code, 3);
-    assert.match(watch.err(), /no longer live/);
-    assert.match(watch.err(), /safety window/);
+    assert.match(watch.err(), /was live in this host's runtime snapshots and is now gone/);
     assert.match(watch.err(), /parle_connect/);
   } finally {
     server.close();
   }
 });
 
-test("watch ignores expired snapshots of its session when deciding DEAD", { skip: !havePython && "python3/kill unavailable" }, async () => {
+test("an expired own-session snapshot never counts as seen-live, so the watch holds", { skip: !havePython && "python3/kill unavailable" }, async () => {
   const cwd = mkdtempSync(join(tmpdir(), "parle-watch-"));
-  // A snapshot for the watched session that is already expired must not count
-  // as live, and an other-session snapshot with a live pid forces the DEAD verdict.
+  // An already-expired snapshot of the watched session must not satisfy the
+  // era gate: the watch never saw the session live, so a sibling live snapshot
+  // yields the inconclusive hold, not exit 3.
   writeSnapshot(cwd, "session-mine", { expiresAt: new Date(Date.now() - 1000).toISOString(), pid: 99999999 });
-  writeSnapshot(cwd, "session-other");
+  writeSnapshot(cwd, "session-other", { pid: process.ppid });
   const server = await stubServer({ messages: [], watermark: 1 });
   try {
     const watch = runWatch(cwd, `http://127.0.0.1:${server.address().port}`, ["1", "session-mine"]);
-    const code = await watch.exited;
-    assert.equal(code, 3);
+    await sleep(1200);
+    assert.equal(watch.child.exitCode, null, `watch exited early: ${watch.err()}${watch.out()}`);
+    assert.match(watch.err(), /has never appeared/);
+    watch.child.kill("SIGKILL");
+    await watch.exited;
   } finally {
     server.close();
   }

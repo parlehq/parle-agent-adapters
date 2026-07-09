@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.5.13 (2026-07-09)
+
+Era-gated watcher liveness: never-present is inconclusive, only present-then-absent exits (adapters#22; script-only, no MCP bundle change).
+
+- Field data (galexc-intercom seq 599) produced a genuinely false exit 3: a live, snapshot-capable session whose runtime file was absent. The DEAD verdict now requires the watch to have itself observed the watched session live in a snapshot during its lifetime; present-then-absent (still two consecutive checks) exits 3, while a session id that never appeared holds and prints a one-time stderr note explaining why (host predating snapshot publishing, different cwd, or a missing file for a live server) with the `PARLE_WATCH_SESSION_LIVENESS=0` escape hatch.
+- Exit-3 guidance in the script and SKILL.md now names the false-verdict recovery: if `parle_connect` reports the same session alive, re-arm with the opt-out.
+- Trade-off accepted per room consensus: arming a watch with an already-dead session id no longer exits 3 immediately (it holds with the note). The connect-first arming flow prevents that case; the silent-stale-watch failure the check was built for remains covered by the era-gated exit.
+
 ## 0.5.12 (2026-07-08)
 
 `parle_status` carries the compact card (bundled artifact refresh; revisits the 89dd52e deferral on live evidence).
