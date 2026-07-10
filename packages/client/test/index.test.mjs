@@ -765,3 +765,34 @@ test("setup and status surface the stale-token warning", () => {
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
+
+test("profile selects an atomic room binding from the personal catalog", () => {
+  const home = mkdtempSync(join(tmpdir(), "parle-profile-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "parle-profile-project-"));
+  try {
+    mkdirSync(join(home, ".parle"), { mode: 0o700 });
+    writeFileSync(join(home, ".parle", "profiles"), "[galexc-intercom]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_profile_token\n", { mode: 0o600 });
+    writeFileSync(join(cwd, ".env"), "PARLE_PROFILE=galexc-intercom\n");
+    const cfg = resolveConfig(cwd, { HOME: home });
+    assert.equal(cfg.profile?.value, "galexc-intercom");
+    assert.equal(cfg.roomId?.value, "019f2946-aef5-77ad-a41d-747ce0fd6a1e");
+    assert.equal(cfg.agentToken?.value, "parle_agt_profile_token");
+    assert.equal(cfg.roomId?.source, "profile:galexc-intercom");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("profile rejects direct room-binding configuration", () => {
+  const home = mkdtempSync(join(tmpdir(), "parle-profile-conflict-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "parle-profile-conflict-project-"));
+  try {
+    mkdirSync(join(home, ".parle"), { mode: 0o700 });
+    writeFileSync(join(home, ".parle", "profiles"), "[p]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_profile_token\n", { mode: 0o600 });
+    assert.throws(() => resolveConfig(cwd, { HOME: home, PARLE_PROFILE: "p", PARLE_ROOM_ID: "stale-room" }), /PARLE_PROFILE from env conflicts with direct configuration/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});

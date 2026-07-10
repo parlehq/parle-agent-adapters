@@ -3,10 +3,12 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { RUNTIME_SCHEMA_VERSION, processStartedAtIso, pruneRuntimeFiles, removeRuntimeFile, writeRuntimeFile } from "./runtime-file.js";
 import { ERROR_ACTIONS, ERROR_REGISTRY, ERROR_SCOPES, type ErrorAction, type ErrorScope } from "./error-contract.js";
+import { loadProfile, profileCatalogPath, type CredentialProfile } from "./profiles.js";
 
 export * from "./format.js";
 export * from "./runtime-file.js";
 export { ERROR_ACTIONS, ERROR_REGISTRY, ERROR_SCOPES, type ErrorAction, type ErrorScope } from "./error-contract.js";
+export { PROFILE_CATALOG_PATH, ProfileConfigError, loadProfile, parseProfiles, profileCatalogPath, type CredentialProfile } from "./profiles.js";
 
 export const DEFAULT_API_BASE = "https://api.parle.sh";
 export const DEFAULT_WAKE_BASE = DEFAULT_API_BASE;
@@ -43,6 +45,7 @@ export type ParleConfig = {
   sessionAlias?: ConfigValue;
   watchEnabled: ConfigValue;
   unreadPollIntervalSeconds: ConfigValue;
+  profile?: ConfigValue;
   warnings: string[];
 };
 
@@ -218,18 +221,30 @@ export function resolveConfig(cwd = process.cwd(), env: Record<string, string | 
     { name: ".parle/credentials", values: credentials },
   ];
   const warnings: string[] = [];
+  const profileSelector = firstConfigValue("PARLE_PROFILE", sources);
+  let profile: CredentialProfile | undefined;
+  if (profileSelector.value) {
+    const conflicts = ["PARLE_ROOM_ID", "PARLE_ROOM_AGENT_TOKEN", "PARLE_AGENT_TOKEN_ID", "PARLE_ROOM_HANDLE", "PARLE_API_BASE", "PARLE_WAKE_BASE"]
+      .map((key) => firstConfigValue(key, sources))
+      .filter((value) => value.value)
+      .map((value) => `${value.source}`);
+    if (conflicts.length) throw new Error(`PARLE_PROFILE from ${profileSelector.source} conflicts with direct configuration (${conflicts.join(", ")}). Remove the direct variables or unset PARLE_PROFILE.`);
+    profile = loadProfile(profileSelector.value, profileCatalogPath(env));
+  }
+  const profileValue = (name: string, value: string | undefined): ConfigValue | undefined => value === undefined ? undefined : { value, source: `profile:${profile!.name}` };
   const cfg: ParleConfig = {
     enabledInput: firstConfigValue("PARLE_ENABLED", sources, "1"),
-    apiBase: firstConfigValue("PARLE_API_BASE", sources, DEFAULT_API_BASE),
-    wakeBase: firstConfigValue("PARLE_WAKE_BASE", sources, DEFAULT_WAKE_BASE),
+    apiBase: profile ? profileValue("PARLE_API_BASE", profile.apiBase ?? DEFAULT_API_BASE)! : firstConfigValue("PARLE_API_BASE", sources, DEFAULT_API_BASE),
+    wakeBase: profile ? profileValue("PARLE_WAKE_BASE", profile.wakeBase ?? DEFAULT_WAKE_BASE)! : firstConfigValue("PARLE_WAKE_BASE", sources, DEFAULT_WAKE_BASE),
     version: versionConfig(env, dotEnv, credentials, warnings),
-    roomId: firstConfigValue("PARLE_ROOM_ID", sources),
-    roomHandle: firstConfigValue("PARLE_ROOM_HANDLE", sources),
-    agentToken: firstConfigValue("PARLE_ROOM_AGENT_TOKEN", sources),
-    agentTokenId: firstConfigValue("PARLE_AGENT_TOKEN_ID", sources),
+    roomId: profile ? profileValue("PARLE_ROOM_ID", profile.roomId) : firstConfigValue("PARLE_ROOM_ID", sources),
+    roomHandle: profile ? undefined : firstConfigValue("PARLE_ROOM_HANDLE", sources),
+    agentToken: profile ? profileValue("PARLE_ROOM_AGENT_TOKEN", profile.agentToken) : firstConfigValue("PARLE_ROOM_AGENT_TOKEN", sources),
+    agentTokenId: profile ? profileValue("PARLE_AGENT_TOKEN_ID", profile.agentTokenId) : firstConfigValue("PARLE_AGENT_TOKEN_ID", sources),
     sessionAlias: firstConfigValue("PARLE_SESSION_ALIAS", sources),
     watchEnabled: firstConfigValue("PARLE_WATCH_ENABLED", sources, "1"),
     unreadPollIntervalSeconds: firstConfigValue("PARLE_UNREAD_POLL_INTERVAL_SECONDS", sources, "60"),
+    profile: profileSelector.value ? profileSelector : undefined,
     warnings,
   };
   for (const value of [cfg.apiBase, cfg.wakeBase, cfg.version, cfg.roomId, cfg.roomHandle, cfg.agentToken, cfg.agentTokenId, cfg.sessionAlias, cfg.watchEnabled]) {
