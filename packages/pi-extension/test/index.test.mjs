@@ -102,7 +102,9 @@ test("deployed entrypoint is the committed bundle", () => {
   // The Pi harness loads the committed dist bundle in deployed checkouts
   // (no installs, no builds there); check-pi-artifact.mjs gates freshness.
   const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const rootManifest = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8"));
   assert.deepEqual(manifest.pi.extensions, ["./dist/index.js"]);
+  assert.deepEqual(rootManifest.pi.extensions, ["./packages/pi-extension/dist/index.js"]);
 });
 
 test("status leaves profile unset when the catalog has no default section", async () => {
