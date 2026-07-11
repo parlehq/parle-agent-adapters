@@ -99,7 +99,10 @@ test("bootstrap failure records failed state with backoff and ensureReadySafe re
 
 test("ensureReadySafe is a no-op without configuration or when already live", async () => {
   let fetched = 0;
-  const unconfigured = new ParleAgentClient({ env: {}, fetch: async () => { fetched += 1; return json({}); } });
+  // HOME must point somewhere empty: with a bare env the catalog path falls
+  // back to the real home directory, and a developer's ~/.parle/profiles
+  // [default] would make this client configured.
+  const unconfigured = new ParleAgentClient({ env: { HOME: tempCwd() }, fetch: async () => { fetched += 1; return json({}); } });
   assert.equal(await unconfigured.ensureReadySafe(), false);
   assert.equal(fetched, 0);
   const counters = {};

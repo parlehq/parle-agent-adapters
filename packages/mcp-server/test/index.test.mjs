@@ -265,7 +265,9 @@ test("stdio server lists the eight v1 tools and setup works without secrets", as
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [new URL("../dist/parle-mcp.js", import.meta.url).pathname],
-    env: { PATH: process.env.PATH || "" },
+    // HOME must point somewhere empty: os.homedir() works even without $HOME,
+    // and a developer's real ~/.parle/profiles [default] would make setup ok.
+    env: { PATH: process.env.PATH || "", HOME: mkdtempSync(join(tmpdir(), "parle-mcp-smoke-home-")) },
     stderr: "pipe",
   });
   const client = new Client({ name: "parle-mcp-smoke", version: "0.0.0" }, { capabilities: {} });

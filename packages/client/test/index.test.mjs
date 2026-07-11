@@ -69,12 +69,12 @@ test("PARLE_VERSION is adapter-owned unless explicitly set in process env", () =
   const cwd = mkdtempSync(join(tmpdir(), "parle-version-config-"));
   try {
     writeFileSync(join(cwd, ".env"), "PARLE_VERSION=from-dotenv\n");
-    const defaultCfg = resolveConfig(cwd, {});
+    const defaultCfg = resolveConfig(cwd, { HOME: cwd });
     assert.equal(defaultCfg.version.value, "2026-07-07");
     assert.equal(defaultCfg.version.source, "default");
     assert.match(defaultCfg.warnings.join("\n"), /Ignoring PARLE_VERSION from \.env/);
 
-    const envCfg = resolveConfig(cwd, { PARLE_VERSION: "from-env" });
+    const envCfg = resolveConfig(cwd, { HOME: cwd, PARLE_VERSION: "from-env" });
     assert.equal(envCfg.version.value, "from-env");
     assert.equal(envCfg.version.source, "env");
     assert.match(envCfg.warnings.join("\n"), /process environment/);
@@ -82,13 +82,13 @@ test("PARLE_VERSION is adapter-owned unless explicitly set in process env", () =
 
     // An env value equal to the adapter default is not an override: no warning,
     // but provenance stays honest (env-snapshotting hosts hit this constantly).
-    const sameCfg = resolveConfig(cwd, { PARLE_VERSION: DEFAULT_VERSION });
+    const sameCfg = resolveConfig(cwd, { HOME: cwd, PARLE_VERSION: DEFAULT_VERSION });
     assert.equal(sameCfg.version.value, DEFAULT_VERSION);
     assert.equal(sameCfg.version.source, "env");
     assert.doesNotMatch(sameCfg.warnings.join("\n"), /process environment/);
 
     rmSync(join(cwd, ".env"));
-    const cleanCfg = resolveConfig(cwd, {});
+    const cleanCfg = resolveConfig(cwd, { HOME: cwd });
     assert.equal(cleanCfg.version.value, "2026-07-07");
     assert.equal(cleanCfg.version.source, "default");
     assert.equal(cleanCfg.warnings.length, 0);
