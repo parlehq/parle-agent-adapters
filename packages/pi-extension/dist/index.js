@@ -32,7 +32,7 @@ var entries = {
   csrf_rejected: { status: 403, action: "fix_client", scope: "request" },
   already_member: { status: 409, action: "stop", scope: "room_access" },
   forbidden: { status: 403, action: "stop", scope: "room_access" },
-  token_quota_exceeded: { status: 403, action: "stop", scope: "agent_token" },
+  token_quota_exceeded: { status: 409, action: "stop", scope: "agent_token" },
   step_up_required: { status: 403, action: "stop", scope: "request" },
   link_conflict: { status: 409, action: "stop", scope: "request" },
   too_many_steps: { status: 422, action: "fix_client", scope: "request" },
@@ -41,6 +41,106 @@ var entries = {
   stream_reset: { status: 409, action: "retry_with_backoff", scope: "server" }
 };
 var ERROR_REGISTRY = Object.fromEntries(Object.entries(entries).map(([code, entry]) => [code, { ...entry, retryable: retryable(entry.action) }]));
+
+// ../client/dist/conformance-data.js
+var CONFORMANCE_PARLE_VERSION = "2026-07-07";
+var CONFORMANCE_TOKEN_CLASSES = [
+  {
+    "name": "participant_bearer",
+    "prefix": "prt_",
+    "secret": true,
+    "shape": "prt_<43 base64url characters>",
+    "redaction_pattern": "prt_[A-Za-z0-9_-]{43}",
+    "redact_with": "prt_<redacted>",
+    "description": "Room-scoped participant bearer.",
+    "examples": [
+      {
+        "input": "prt_abcdefghijklmnopqrstuvwxyzABCDEFGHIJK012345",
+        "expected": "prt_<redacted>"
+      },
+      {
+        "input": "prt_not a token",
+        "expected": "prt_not a token"
+      }
+    ]
+  },
+  {
+    "name": "agent_bearer",
+    "prefix": "parle_agt_",
+    "secret": true,
+    "shape": "parle_agt_<43 base64url characters>",
+    "redaction_pattern": "parle_agt_[A-Za-z0-9_-]{43}",
+    "redact_with": "<redacted-token>",
+    "description": "Room-bound agent bearer.",
+    "examples": [
+      {
+        "input": "parle_agt_abcdefghijklmnopqrstuvwxyzABCDEFGHIJK012345",
+        "expected": "<redacted-token>"
+      },
+      {
+        "input": "parle_agt_not a token",
+        "expected": "parle_agt_not a token"
+      }
+    ]
+  },
+  {
+    "name": "agent_session_credential",
+    "prefix": "parle_ses_",
+    "secret": true,
+    "shape": "parle_ses_<43 base64url characters>",
+    "redaction_pattern": "parle_ses_[A-Za-z0-9_-]{43}",
+    "redact_with": "<redacted-token>",
+    "description": "Live agent-session credential.",
+    "examples": [
+      {
+        "input": "parle_ses_abcdefghijklmnopqrstuvwxyzABCDEFGHIJK012345",
+        "expected": "<redacted-token>"
+      },
+      {
+        "input": "parle_ses_not a token",
+        "expected": "parle_ses_not a token"
+      }
+    ]
+  },
+  {
+    "name": "invite_secret",
+    "prefix": "parle_inv_",
+    "secret": true,
+    "shape": "parle_inv_<43 base64url characters>",
+    "redaction_pattern": "parle_inv_[A-Za-z0-9_-]{43}",
+    "redact_with": "<redacted-token>",
+    "description": "Invite claim secret.",
+    "examples": [
+      {
+        "input": "parle_inv_abcdefghijklmnopqrstuvwxyzABCDEFGHIJK012345",
+        "expected": "<redacted-token>"
+      },
+      {
+        "input": "parle_inv_not a token",
+        "expected": "parle_inv_not a token"
+      }
+    ]
+  },
+  {
+    "name": "human_session_cookie",
+    "prefix": "parle_sess_",
+    "secret": true,
+    "shape": "parle_sess_<43 base64url characters>",
+    "redaction_pattern": "parle_sess_[A-Za-z0-9_-]{43}",
+    "redact_with": "<redacted-token>",
+    "description": "Human session cookie value.",
+    "examples": [
+      {
+        "input": "parle_sess_abcdefghijklmnopqrstuvwxyzABCDEFGHIJK012345",
+        "expected": "<redacted-token>"
+      },
+      {
+        "input": "parle_sess_not a token",
+        "expected": "parle_sess_not a token"
+      }
+    ]
+  }
+];
 
 // ../client/dist/profiles.js
 import { execFileSync } from "node:child_process";
@@ -154,7 +254,7 @@ function loadProfile(name, path = PROFILE_CATALOG_PATH) {
 
 // ../client/dist/index.js
 var DEFAULT_API_BASE = "https://api.parle.sh";
-var DEFAULT_VERSION = "2026-07-07";
+var DEFAULT_VERSION = CONFORMANCE_PARLE_VERSION;
 var READ_LIMIT_BYTES = 256 * 1024;
 function parseKeyValueFile(text) {
   const out = {};
@@ -181,8 +281,15 @@ function formatVersionErrorHint(cfg, errorObj) {
   const action = cfg.version.source === "default" ? "Upgrade the adapter." : "Unset the stale PARLE_VERSION override or upgrade the adapter.";
   return ` Sent Parle-Version ${sent} from ${cfg.version.source}; adapter default is ${DEFAULT_VERSION}.${server} ${action}`;
 }
+var TOKEN_REDACTION_RULES = CONFORMANCE_TOKEN_CLASSES.map((cls) => ({
+  pattern: new RegExp(cls.redaction_pattern, "g"),
+  replacement: cls.redact_with
+}));
 function redactString(input) {
-  return input.replace(/Bearer\s+[A-Za-z0-9_./+=:-]+/g, "Bearer <redacted>").replace(/(__Host-parle_session=)[^;\s]+/g, "$1<redacted>").replace(/(parle_(?:agt|inv|ses)_[A-Za-z0-9_./+=:-]+)/g, "<redacted-token>").replace(/\bprt_[A-Za-z0-9_./+=:-]+/g, "prt_<redacted>").replace(/(Idempotency-Key\s*[:=]\s*)[A-Za-z0-9._:-]+/gi, "$1<redacted>").replace(/(Parle-Agent-Session\s*[:=]\s*)[A-Za-z0-9._:-]+/gi, "$1<redacted>");
+  let out = input.replace(/Bearer\s+[A-Za-z0-9_./+=:-]+/g, "Bearer <redacted>").replace(/(__Host-parle_session=)[^;\s]+/g, "$1<redacted>").replace(/(Idempotency-Key\s*[:=]\s*)[A-Za-z0-9._:-]+/gi, "$1<redacted>").replace(/(Parle-Agent-Session\s*[:=]\s*)[A-Za-z0-9._:-]+/gi, "$1<redacted>");
+  for (const rule of TOKEN_REDACTION_RULES)
+    out = out.replace(rule.pattern, rule.replacement);
+  return out;
 }
 function summarizeSendDelivery(details) {
   const moderation = details?.moderation;
@@ -211,7 +318,7 @@ function summarizeSendDelivery(details) {
 // src/index.ts
 import { Type } from "typebox";
 var EXTENSION_ID = "25-parle";
-var PI_EXTENSION_VERSION = "0.1.16";
+var PI_EXTENSION_VERSION = "0.1.17";
 var RUNTIME_SCHEMA_VERSION2 = 1;
 var AI_GUIDANCE_URL = "https://ai.parle.sh";
 var API_LLMS_URL = "https://api.parle.sh/llms.txt";

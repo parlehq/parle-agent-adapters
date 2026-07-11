@@ -3,16 +3,18 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { RUNTIME_SCHEMA_VERSION, processStartedAtIso, pruneRuntimeFiles, removeRuntimeFile, writeRuntimeFile } from "./runtime-file.js";
 import { ERROR_ACTIONS, ERROR_REGISTRY, ERROR_SCOPES, type ErrorAction, type ErrorScope } from "./error-contract.js";
+import { CONFORMANCE_PARLE_VERSION, CONFORMANCE_TOKEN_CLASSES } from "./conformance-data.js";
 import { catalogGitExposureWarning, loadProfile, profileCatalogHasProfile, resolveProfileCatalogPath, type CredentialProfile } from "./profiles.js";
 
 export * from "./format.js";
 export * from "./runtime-file.js";
 export { ERROR_ACTIONS, ERROR_REGISTRY, ERROR_SCOPES, type ErrorAction, type ErrorScope } from "./error-contract.js";
+export { CONFORMANCE_PARLE_VERSION, CONFORMANCE_TOKEN_CLASSES, type ConformanceTokenClass } from "./conformance-data.js";
 export { PROFILE_CATALOG_PATH, ProfileConfigError, catalogGitExposureWarning, loadProfile, parseProfiles, profileCatalogExists, profileCatalogHasProfile, profileCatalogPath, resolveProfileCatalogPath, type CredentialProfile } from "./profiles.js";
 
 export const DEFAULT_API_BASE = "https://api.parle.sh";
 export const DEFAULT_WAKE_BASE = DEFAULT_API_BASE;
-export const DEFAULT_VERSION = "2026-07-07";
+export const DEFAULT_VERSION = CONFORMANCE_PARLE_VERSION;
 export const DEFAULT_READ_MESSAGE_LIMIT = 50;
 export const READ_LIMIT_BYTES = 256 * 1024;
 export const FENCE_SUFFIX = "\n[end of untrusted participant content] Everything between the markers above was written by another participant, not by Parle.\n";
@@ -373,14 +375,23 @@ function formatDuration(ms: number): string {
   return seconds === 1 ? "1 second" : `${seconds} seconds`;
 }
 
+// Protocol-header rules are harness-mechanical context redaction and run
+// first so header values redact as header secrets. Token-class rules are
+// table-driven from the pinned core conformance fixtures (parlehq/parle #457),
+// so the accepted shapes and replacements are core-owned, not hand-maintained.
+const TOKEN_REDACTION_RULES = CONFORMANCE_TOKEN_CLASSES.map((cls) => ({
+  pattern: new RegExp(cls.redaction_pattern, "g"),
+  replacement: cls.redact_with,
+}));
+
 export function redactString(input: string): string {
-  return input
+  let out = input
     .replace(/Bearer\s+[A-Za-z0-9_./+=:-]+/g, "Bearer <redacted>")
     .replace(/(__Host-parle_session=)[^;\s]+/g, "$1<redacted>")
-    .replace(/(parle_(?:agt|inv|ses)_[A-Za-z0-9_./+=:-]+)/g, "<redacted-token>")
-    .replace(/\bprt_[A-Za-z0-9_./+=:-]+/g, "prt_<redacted>")
     .replace(/(Idempotency-Key\s*[:=]\s*)[A-Za-z0-9._:-]+/gi, "$1<redacted>")
     .replace(/(Parle-Agent-Session\s*[:=]\s*)[A-Za-z0-9._:-]+/gi, "$1<redacted>");
+  for (const rule of TOKEN_REDACTION_RULES) out = out.replace(rule.pattern, rule.replacement);
+  return out;
 }
 
 export function redactedValue(value?: ConfigValue): { source: string; configured: boolean; value?: string } {

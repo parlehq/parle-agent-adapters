@@ -1,0 +1,26 @@
+{
+  "parle_version": "2026-07-07",
+  "fixture_schema_version": 1,
+  "generated_by": "go run ./cmd/conformance-export",
+  "compatibility_notes": [
+    "Slice 1 covers roomhttp versions, errors, and token redaction only.",
+    "Account-plane errors and room-flow fixtures are intentionally deferred."
+  ],
+  "fixtures": [
+    {
+      "name": "version",
+      "path": "version.json",
+      "sha256": "8686be6f56d44a9ba3863de4b0075fe946e8372fe52f6a52e62409abfd56e0a3"
+    },
+    {
+      "name": "error_registry",
+      "path": "error-registry.json",
+      "sha256": "b0bec76631b1ab058f61d33c543f4248ce2bc6a85293eb4a9b3213703fce1ffe"
+    },
+    {
+      "name": "token_classes",
+      "path": "token-classes.json",
+      "sha256": "013e9ddd2e3b4b266dc43b34ca23f75213f673736856e0a7d0dc79e7f1abbb3d"
+    }
+  ]
+}

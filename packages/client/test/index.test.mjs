@@ -27,21 +27,56 @@ import {
   updateCursorFromMessages,
 } from "../dist/index.js";
 
-test("adapter DEFAULT_VERSION constants stay in lockstep with the API fixture", () => {
+test("adapter DEFAULT_VERSION stays in lockstep with the pinned core fixture", () => {
   const clientSrc = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
   const piSrc = readFileSync(new URL("../../pi-extension/src/index.ts", import.meta.url), "utf8");
   const watchScript = readFileSync(new URL("../../claude-plugin/skills/parle/scripts/parle-watch.sh", import.meta.url), "utf8");
   const mcpSrc = readFileSync(new URL("../../mcp-server/src/index.ts", import.meta.url), "utf8");
-  const apiVersion = JSON.parse(readFileSync(new URL("fixtures/api-version.json", import.meta.url), "utf8"));
-  assert.equal(DEFAULT_VERSION, apiVersion.current);
-  assert.equal(apiVersion.supported.includes(DEFAULT_VERSION), true);
-  assert.match(clientSrc, new RegExp(`DEFAULT_VERSION = "${DEFAULT_VERSION}"`));
-  // Pi holds lockstep by construction: it imports the client constant instead
-  // of pinning its own literal.
+  const pin = JSON.parse(readFileSync(new URL("../conformance.pin.json", import.meta.url), "utf8"));
+  const versionFixture = JSON.parse(readFileSync(new URL(`../conformance/${pin.parle_version}/version.json`, import.meta.url), "utf8"));
+  // The whole chain holds by construction: version fixture -> generated
+  // conformance-data.ts -> DEFAULT_VERSION -> Pi via client import.
+  assert.equal(DEFAULT_VERSION, versionFixture.parle_version);
+  assert.equal(DEFAULT_VERSION, pin.parle_version);
+  assert.match(clientSrc, /DEFAULT_VERSION = CONFORMANCE_PARLE_VERSION/);
   assert.match(piSrc, /DEFAULT_VERSION[^\n]*from "@parlehq\/agent-client"/);
   assert.doesNotMatch(piSrc, /const DEFAULT_VERSION =/);
   assert.match(watchScript, /--parle-watch/);
   assert.match(mcpSrc, /PARLE_VERSION: config\.version\.value/);
+});
+
+test("vendored conformance fixtures match the pin and regenerate cleanly", async () => {
+  const { sha256, renderConformanceData } = await import("../../../scripts/sync-conformance.mjs");
+  const pin = JSON.parse(readFileSync(new URL("../conformance.pin.json", import.meta.url), "utf8"));
+  assert.equal(pin.fixture_schema_version, 1);
+  assert.match(pin.core_ref, /^[0-9a-f]{40}$/);
+  const dir = new URL(`../conformance/${pin.parle_version}/`, import.meta.url);
+  for (const [path, expected] of Object.entries(pin.files)) {
+    assert.equal(sha256(readFileSync(new URL(path, dir))), expected, `pin hash mismatch for ${path}`);
+  }
+  const manifest = JSON.parse(readFileSync(new URL("manifest.json", dir), "utf8"));
+  assert.equal(manifest.parle_version, pin.parle_version);
+  assert.equal(manifest.fixture_schema_version, pin.fixture_schema_version);
+  for (const fixture of manifest.fixtures) assert.equal(pin.files[fixture.path], fixture.sha256);
+  const generated = readFileSync(new URL("../src/conformance-data.ts", import.meta.url), "utf8");
+  const rendered = renderConformanceData(
+    readFileSync(new URL("version.json", dir), "utf8"),
+    readFileSync(new URL("token-classes.json", dir), "utf8"),
+  );
+  assert.equal(generated, rendered, "src/conformance-data.ts is stale; re-run scripts/sync-conformance.mjs");
+});
+
+test("redaction follows the core conformance corpus", () => {
+  const pin = JSON.parse(readFileSync(new URL("../conformance.pin.json", import.meta.url), "utf8"));
+  const tokens = JSON.parse(readFileSync(new URL(`../conformance/${pin.parle_version}/token-classes.json`, import.meta.url), "utf8"));
+  for (const cls of tokens.token_classes) {
+    for (const example of cls.examples) {
+      assert.equal(redactString(example.input), example.expected, `token class ${cls.name}`);
+    }
+  }
+  for (const example of tokens.protocol_redaction_examples) {
+    assert.equal(redactString(example.input), example.expected, `protocol example: ${example.input}`);
+  }
 });
 
 test("client boundary scan ignores prose and detects forbidden import specifiers", () => {
@@ -122,10 +157,11 @@ test("client safe-base validation uses injected env", async () => {
 
 test("secret values and protocol headers are redacted", () => {
   assert.deepEqual(redactedSecretValue({ source: "env", value: "opaque-token" }), { source: "env", configured: true, value: "<redacted>" });
-  const text = "Bearer abc.def Idempotency-Key: idem-1 Parle-Agent-Session=s1 parle_inv_secret parle_agt_secret prt_secret";
-  assert.equal(redactString(text), "Bearer <redacted> Idempotency-Key: <redacted> Parle-Agent-Session=<redacted> <redacted-token> <redacted-token> prt_<redacted>");
+  // Token-shape redaction is pinned by the core corpus test; here we keep the
+  // header rules honest against non-shaped values that only context can catch.
+  const text = "Bearer abc.def Idempotency-Key: idem-1 Parle-Agent-Session=s1";
+  assert.equal(redactString(text), "Bearer <redacted> Idempotency-Key: <redacted> Parle-Agent-Session=<redacted>");
   assert.equal(redactString("Cookie: __Host-parle_session=abc123; theme=dark"), "Cookie: __Host-parle_session=<redacted>; theme=dark");
-  assert.equal(redactString("session parle_ses_abc123 expired"), "session <redacted-token> expired");
 });
 
 test("wait clamp is bounded and integral", () => {
@@ -269,16 +305,19 @@ test("bootstrap keeps the parle_ses_ credential intact and presents it at room e
 });
 
 test("rawResponse requests still redact error text and details", async () => {
+  // Shape-valid fake: token-class redaction is pinned to the core corpus
+  // (prefix + 43 base64url chars), so leak fakes must look like real tokens.
+  const leaked = "parle_ses_" + "x".repeat(43);
   const client = new ParleAgentClient({
     env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "parle_agt_secret", PARLE_ALLOW_INSECURE_LOCAL: "1" },
-    fetch: async () => json({ error: { code: "bad", message: "leaked parle_ses_oops in error" } }, 400),
+    fetch: async () => json({ error: { code: "bad", message: `leaked ${leaked} in error` } }, 400),
   });
   await client.requestJson("/v/agent/sessions", { method: "POST", body: {}, rawResponse: true }).then(
     () => assert.fail("expected rejection"),
     (error) => {
       assert.match(error.message, /Parle API 400/);
-      assert.equal(error.message.includes("parle_ses_oops"), false);
-      assert.equal(JSON.stringify(error.details).includes("parle_ses_oops"), false);
+      assert.equal(error.message.includes(leaked), false);
+      assert.equal(JSON.stringify(error.details).includes(leaked), false);
     },
   );
 });
@@ -458,13 +497,17 @@ test("send maps bootstrap setup errors into structured send failure", async () =
   assert.match(result.error, /PARLE_ROOM_AGENT_TOKEN is missing/);
 });
 
-test("shared error contract fixture matches vendored server registry snapshot", () => {
-  const golden = JSON.parse(readFileSync(new URL("../testdata/error-registry.golden.json", import.meta.url), "utf8"));
-  // Refresh after server registry changes by copying /openapi.json default error
-  // enum fields and internal/roomhttp/error_contract.go mappings into this file.
-  assert.deepEqual(ERROR_ACTIONS, golden.actions);
-  assert.deepEqual(ERROR_SCOPES, golden.scopes);
-  assert.deepEqual(ERROR_REGISTRY, golden.registry);
+test("shared error contract matches the pinned core error-registry fixture", () => {
+  const pin = JSON.parse(readFileSync(new URL("../conformance.pin.json", import.meta.url), "utf8"));
+  const fixture = JSON.parse(readFileSync(new URL(`../conformance/${pin.parle_version}/error-registry.json`, import.meta.url), "utf8"));
+  const registry = Object.fromEntries(fixture.errors.map(({ code, ...spec }) => [code, spec]));
+  assert.deepEqual(ERROR_REGISTRY, registry);
+  // The fixture carries per-error facts; every action/scope it uses must be a
+  // member of the shared closed sets.
+  for (const entry of fixture.errors) {
+    assert.equal(ERROR_ACTIONS.includes(entry.action), true, `unknown action ${entry.action}`);
+    assert.equal(ERROR_SCOPES.includes(entry.scope), true, `unknown scope ${entry.scope}`);
+  }
 });
 
 test("requestJson parses canonical error envelope action scope and retry delay", async () => {

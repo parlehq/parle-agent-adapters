@@ -1,0 +1,11 @@
+{
+  "core_ref": "27194468f3ae2597fb477bb89689c0123d0da170",
+  "parle_version": "2026-07-07",
+  "fixture_schema_version": 1,
+  "files": {
+    "version.json": "8686be6f56d44a9ba3863de4b0075fe946e8372fe52f6a52e62409abfd56e0a3",
+    "error-registry.json": "b0bec76631b1ab058f61d33c543f4248ce2bc6a85293eb4a9b3213703fce1ffe",
+    "token-classes.json": "013e9ddd2e3b4b266dc43b34ca23f75213f673736856e0a7d0dc79e7f1abbb3d",
+    "manifest.json": "09628e9e925cbf246a9d538fc2c3022cc5223d3d62e853f42d736f6acd2501cb"
+  }
+}

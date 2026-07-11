@@ -57,7 +57,7 @@ const entries = {
   csrf_rejected: { status: 403, action: "fix_client", scope: "request" },
   already_member: { status: 409, action: "stop", scope: "room_access" },
   forbidden: { status: 403, action: "stop", scope: "room_access" },
-  token_quota_exceeded: { status: 403, action: "stop", scope: "agent_token" },
+  token_quota_exceeded: { status: 409, action: "stop", scope: "agent_token" },
   step_up_required: { status: 403, action: "stop", scope: "request" },
   link_conflict: { status: 409, action: "stop", scope: "request" },
   too_many_steps: { status: 422, action: "fix_client", scope: "request" },

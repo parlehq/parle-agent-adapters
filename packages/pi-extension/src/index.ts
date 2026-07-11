@@ -5,7 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { DEFAULT_API_BASE, DEFAULT_VERSION, catalogGitExposureWarning, loadProfile, formatVersionErrorHint, parseKeyValueFile, parseProfiles, profileCatalogHasProfile, redactString, resolveProfileCatalogPath, summarizeSendDelivery, type CredentialProfile } from "@parlehq/agent-client";
 import { Type } from "typebox";
 const EXTENSION_ID = "25-parle";
-const PI_EXTENSION_VERSION = "0.1.16";
+const PI_EXTENSION_VERSION = "0.1.17";
 const RUNTIME_SCHEMA_VERSION = 1;
 const AI_GUIDANCE_URL = "https://ai.parle.sh";
 const API_LLMS_URL = "https://api.parle.sh/llms.txt";
