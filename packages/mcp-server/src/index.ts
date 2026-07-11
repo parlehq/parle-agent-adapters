@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { pathToFileURL } from "node:url";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
-import { ParleAgentClient, ParleApiError, ReadParams, SendParams, compactConnectionCardFromSummary, compactStatusCardFromStatus } from "@parlehq/agent-client";
+import { ParleAgentClient, ParleApiError, ReadParams, SendParams, compactConnectionCardFromSummary, compactStatusCardFromStatus, redactString, resolveConfig } from "@parlehq/agent-client";
 
 export type ParleMcpClientLike = {
   status(): unknown;
@@ -118,7 +121,7 @@ export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgent
 }
 
 export async function runStdio() {
-  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.0.0" } });
+  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.4" } });
   const server = createParleMcpServer(client);
   installLifecycleHandlers(client);
   await server.connect(new StdioServerTransport());
@@ -172,9 +175,94 @@ export function isDirectRun(metaUrl: string, argvPath = process.argv[1]): boolea
   return Boolean(argvPath) && metaUrl === pathToFileURL(argvPath).href;
 }
 
+export function resolveWatcherEnvironment(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env, onWarning?: (warning: string) => void): NodeJS.ProcessEnv {
+  const config = resolveConfig(cwd, env);
+  for (const warning of config.warnings) onWarning?.(redactString(warning));
+  const roomId = config.roomId?.value;
+  const agentToken = config.agentToken?.value;
+  if (!roomId || !agentToken) {
+    throw new Error("required host configuration is missing. Set PARLE_PROFILE or PARLE_ROOM_ID / PARLE_ROOM_AGENT_TOKEN in env, ./.env, or ./.parle/credentials (run from the project directory)");
+  }
+  return {
+    ...env,
+    PARLE_API_BASE: config.apiBase.value,
+    PARLE_WAKE_BASE: config.wakeBase.value,
+    PARLE_VERSION: config.version.value,
+    PARLE_ROOM_ID: roomId,
+    PARLE_ROOM_AGENT_TOKEN: agentToken,
+  };
+}
+
+export async function runWatcher(metaUrl: string, args: string[], cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): Promise<number> {
+  const worker = join(dirname(fileURLToPath(metaUrl)), "..", "skills", "parle", "scripts", "parle-watch-worker.sh");
+  if (!existsSync(worker)) throw new Error("bundled watcher worker is missing; reinstall or rebuild the Claude plugin");
+  const childEnv = resolveWatcherEnvironment(cwd, env, (warning) => console.error(`Parle warning: ${warning}`));
+  childEnv.PARLE_WATCH_REQUEST_HELPER = fileURLToPath(metaUrl);
+  childEnv.PARLE_WATCH_PARENT_PID = String(process.pid);
+  const child = spawn("sh", [worker, ...args], { cwd, env: childEnv, stdio: "inherit" });
+  const forward = (signal: NodeJS.Signals) => child.kill(signal);
+  process.once("SIGINT", forward);
+  process.once("SIGTERM", forward);
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      process.removeListener("SIGINT", forward);
+      process.removeListener("SIGTERM", forward);
+      resolve(code ?? (signal ? 128 : 2));
+    });
+  });
+}
+
+async function runWatcherRequest(since: string): Promise<void> {
+  const apiBase = process.env.PARLE_API_BASE;
+  const roomId = process.env.PARLE_ROOM_ID;
+  const token = process.env.PARLE_ROOM_AGENT_TOKEN;
+  const version = process.env.PARLE_VERSION;
+  if (!apiBase || !roomId || !token || !version) throw new Error("watch request configuration is missing");
+  const url = new URL(`/v/rooms/${encodeURIComponent(roomId)}/projection`, apiBase);
+  url.searchParams.set("since_seq", since);
+  url.searchParams.set("wait", "25");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 40_000);
+  const parentPid = Number(process.env.PARLE_WATCH_PARENT_PID);
+  const parentMonitor = Number.isInteger(parentPid) && parentPid > 0 ? setInterval(() => {
+    try {
+      process.kill(parentPid, 0);
+    } catch {
+      controller.abort();
+    }
+  }, 500) : undefined;
+  parentMonitor?.unref();
+  try {
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}`, "Parle-Version": version, Connection: "close" },
+      signal: controller.signal,
+    });
+    const raw = await response.text();
+    const withoutExactToken = raw.split(token).join("<redacted>");
+    await new Promise<void>((resolve) => process.stdout.write(`${response.status}\n${redactString(withoutExactToken)}`, () => resolve()));
+  } catch {
+    await new Promise<void>((resolve) => process.stdout.write("000\n{}", () => resolve()));
+  } finally {
+    clearTimeout(timer);
+    if (parentMonitor) clearInterval(parentMonitor);
+  }
+}
+
 if (isDirectRun(import.meta.url)) {
-  runStdio().catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exit(1);
+  const command = process.argv[2];
+  const isRequest = command === "--parle-watch-request";
+  const task = command === "--parle-watch"
+    ? runWatcher(import.meta.url, process.argv.slice(3)).then((code) => { process.exitCode = code; })
+    : isRequest
+      ? runWatcherRequest(process.argv[3] ?? "0")
+      : runStdio();
+  task.then(() => {
+    // Node's global fetch keeps an idle connection alive. The one-shot private
+    // request helper has flushed stdout and must not linger after each poll.
+    if (isRequest) process.exit(0);
+  }).catch((error) => {
+    console.error(`Parle stopped: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 2;
   });
 }

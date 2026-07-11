@@ -30953,11 +30953,14 @@ var StdioServerTransport = class {
 };
 
 // src/index.ts
-import { pathToFileURL } from "node:url";
+import { spawn } from "node:child_process";
+import { existsSync as existsSync3 } from "node:fs";
+import { dirname, join as join4 } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // ../client/dist/index.js
-import { readFileSync as readFileSync2, existsSync } from "node:fs";
-import { join as join2 } from "node:path";
+import { readFileSync as readFileSync3, existsSync as existsSync2 } from "node:fs";
+import { join as join3 } from "node:path";
 import { randomUUID } from "node:crypto";
 
 // ../client/dist/runtime-file.js
@@ -31082,6 +31085,96 @@ var entries = {
   stream_reset: { status: 409, action: "retry_with_backoff", scope: "server" }
 };
 var ERROR_REGISTRY = Object.fromEntries(Object.entries(entries).map(([code, entry]) => [code, { ...entry, retryable: retryable(entry.action) }]));
+
+// ../client/dist/profiles.js
+import { existsSync, lstatSync, readFileSync as readFileSync2, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join as join2 } from "node:path";
+var PROFILE_CATALOG_PATH = join2(homedir(), ".parle", "profiles");
+function profileCatalogPath(env = process.env) {
+  const home = env.HOME || env.USERPROFILE || homedir();
+  return join2(home, ".parle", "profiles");
+}
+var ProfileConfigError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProfileConfigError";
+  }
+};
+var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var ALLOWED_KEYS = /* @__PURE__ */ new Set(["room_id", "agent_token", "agent_token_id", "api_base", "wake_base"]);
+function assertSafeCatalog(path) {
+  const link = lstatSync(path);
+  const stat = link.isSymbolicLink() ? statSync(path) : link;
+  if (!stat.isFile())
+    throw new ProfileConfigError(`Parle profile catalog must be a regular file: ${path}`);
+  if (process.platform !== "win32" && stat.uid !== process.getuid?.())
+    throw new ProfileConfigError(`Parle profile catalog must be owned by the current user: ${path}`);
+  if (process.platform !== "win32" && (stat.mode & 63) !== 0)
+    console.warn(`Parle warning: profile catalog should be mode 0600: ${path}`);
+}
+function parseProfiles(text, path = PROFILE_CATALOG_PATH) {
+  const sections = /* @__PURE__ */ new Map();
+  let current;
+  for (const [index, raw] of text.split(/\r?\n/).entries()) {
+    const line2 = raw.trim();
+    if (!line2 || line2.startsWith("#") || line2.startsWith(";"))
+      continue;
+    const section = line2.match(/^\[([^\]\r\n]+)\]$/);
+    if (section) {
+      current = section[1];
+      if (sections.has(current))
+        throw new ProfileConfigError(`${path}:${index + 1}: duplicate profile ${current}`);
+      sections.set(current, {});
+      continue;
+    }
+    const equals = line2.indexOf("=");
+    if (!current || equals <= 0)
+      throw new ProfileConfigError(`${path}:${index + 1}: expected a profile section or key=value`);
+    const key = line2.slice(0, equals).trim();
+    const value = line2.slice(equals + 1).trim();
+    if (!ALLOWED_KEYS.has(key))
+      throw new ProfileConfigError(`${path}:${index + 1}: unknown profile key ${key}`);
+    if (!value)
+      throw new ProfileConfigError(`${path}:${index + 1}: ${key} must not be empty`);
+    const fields = sections.get(current);
+    if (fields[key] !== void 0)
+      throw new ProfileConfigError(`${path}:${index + 1}: duplicate ${key} in profile ${current}`);
+    fields[key] = value;
+  }
+  const profiles = /* @__PURE__ */ new Map();
+  for (const [name, fields] of sections) {
+    if (!fields.room_id)
+      throw new ProfileConfigError(`${path}: profile ${name} is missing room_id`);
+    if (!UUID_RE.test(fields.room_id))
+      throw new ProfileConfigError(`${path}: profile ${name} has an invalid room_id`);
+    if (!fields.agent_token)
+      throw new ProfileConfigError(`${path}: profile ${name} is missing agent_token`);
+    if (!/^parle_agt_\S+$/.test(fields.agent_token))
+      throw new ProfileConfigError(`${path}: profile ${name} has an invalid agent_token`);
+    if (fields.agent_token_id && !UUID_RE.test(fields.agent_token_id))
+      throw new ProfileConfigError(`${path}: profile ${name} has an invalid agent_token_id`);
+    profiles.set(name, { name, roomId: fields.room_id, agentToken: fields.agent_token, agentTokenId: fields.agent_token_id, apiBase: fields.api_base, wakeBase: fields.wake_base });
+  }
+  return profiles;
+}
+function profileCatalogHasProfile(name, path = PROFILE_CATALOG_PATH) {
+  if (!existsSync(path))
+    return false;
+  assertSafeCatalog(path);
+  return parseProfiles(readFileSync2(path, "utf8"), path).has(name);
+}
+function loadProfile(name, path = PROFILE_CATALOG_PATH) {
+  if (!existsSync(path))
+    throw new ProfileConfigError(`Parle profile catalog is missing: ${path}. Create it with [${name}], room_id, and agent_token.`);
+  assertSafeCatalog(path);
+  const profiles = parseProfiles(readFileSync2(path, "utf8"), path);
+  const profile = profiles.get(name);
+  if (profile)
+    return profile;
+  const available = [...profiles.keys()].join(", ") || "none";
+  throw new ProfileConfigError(`Parle profile ${name} was not found in ${path}. Available profiles: ${available}`);
+}
 
 // ../client/dist/format.js
 var DEFAULT_NEXT = "open another session and send a message to this Session Address.";
@@ -31221,9 +31314,9 @@ function parseKeyValueFile(text) {
   return out;
 }
 function readKeyValueFile(path) {
-  if (!existsSync(path))
+  if (!existsSync2(path))
     return {};
-  return parseKeyValueFile(readFileSync2(path, "utf8"));
+  return parseKeyValueFile(readFileSync3(path, "utf8"));
 }
 function firstConfigValue(name, sources, fallback) {
   for (const source of sources) {
@@ -31247,26 +31340,41 @@ function versionConfig(env, dotEnv, credentials, warnings) {
   return { value: DEFAULT_VERSION, source: "default" };
 }
 function resolveConfig(cwd = process.cwd(), env = process.env) {
-  const dotEnv = readKeyValueFile(join2(cwd, ".env"));
-  const credentials = readKeyValueFile(join2(cwd, ".parle", "credentials"));
+  const dotEnv = readKeyValueFile(join3(cwd, ".env"));
+  const credentials = readKeyValueFile(join3(cwd, ".parle", "credentials"));
   const sources = [
     { name: "env", values: env },
     { name: ".env", values: dotEnv },
     { name: ".parle/credentials", values: credentials }
   ];
   const warnings = [];
+  const directBindingKeys = ["PARLE_ROOM_ID", "PARLE_ROOM_AGENT_TOKEN", "PARLE_AGENT_TOKEN_ID", "PARLE_ROOM_HANDLE", "PARLE_API_BASE", "PARLE_WAKE_BASE"];
+  const directValues = directBindingKeys.map((key) => firstConfigValue(key, sources)).filter((value) => value.value);
+  const explicitProfile = firstConfigValue("PARLE_PROFILE", sources);
+  const catalogPath = profileCatalogPath(env);
+  const profileSelector = explicitProfile.value ? explicitProfile : directValues.length === 0 && profileCatalogHasProfile("default", catalogPath) ? { value: "default", source: "profile_catalog" } : explicitProfile;
+  let profile;
+  if (profileSelector.value) {
+    if (directValues.length) {
+      const conflicts = directValues.map((value) => `${value.source}`);
+      throw new Error(`PARLE_PROFILE from ${profileSelector.source} conflicts with direct configuration (${conflicts.join(", ")}). Remove the direct variables or unset PARLE_PROFILE.`);
+    }
+    profile = loadProfile(profileSelector.value, catalogPath);
+  }
+  const profileValue = (name, value) => value === void 0 ? void 0 : { value, source: `profile:${profile.name}` };
   const cfg = {
     enabledInput: firstConfigValue("PARLE_ENABLED", sources, "1"),
-    apiBase: firstConfigValue("PARLE_API_BASE", sources, DEFAULT_API_BASE),
-    wakeBase: firstConfigValue("PARLE_WAKE_BASE", sources, DEFAULT_WAKE_BASE),
+    apiBase: profile ? profileValue("PARLE_API_BASE", profile.apiBase ?? DEFAULT_API_BASE) : firstConfigValue("PARLE_API_BASE", sources, DEFAULT_API_BASE),
+    wakeBase: profile ? profileValue("PARLE_WAKE_BASE", profile.wakeBase ?? DEFAULT_WAKE_BASE) : firstConfigValue("PARLE_WAKE_BASE", sources, DEFAULT_WAKE_BASE),
     version: versionConfig(env, dotEnv, credentials, warnings),
-    roomId: firstConfigValue("PARLE_ROOM_ID", sources),
-    roomHandle: firstConfigValue("PARLE_ROOM_HANDLE", sources),
-    agentToken: firstConfigValue("PARLE_ROOM_AGENT_TOKEN", sources),
-    agentTokenId: firstConfigValue("PARLE_AGENT_TOKEN_ID", sources),
+    roomId: profile ? profileValue("PARLE_ROOM_ID", profile.roomId) : firstConfigValue("PARLE_ROOM_ID", sources),
+    roomHandle: profile ? void 0 : firstConfigValue("PARLE_ROOM_HANDLE", sources),
+    agentToken: profile ? profileValue("PARLE_ROOM_AGENT_TOKEN", profile.agentToken) : firstConfigValue("PARLE_ROOM_AGENT_TOKEN", sources),
+    agentTokenId: profile ? profileValue("PARLE_AGENT_TOKEN_ID", profile.agentTokenId) : firstConfigValue("PARLE_AGENT_TOKEN_ID", sources),
     sessionAlias: firstConfigValue("PARLE_SESSION_ALIAS", sources),
     watchEnabled: firstConfigValue("PARLE_WATCH_ENABLED", sources, "1"),
     unreadPollIntervalSeconds: firstConfigValue("PARLE_UNREAD_POLL_INTERVAL_SECONDS", sources, "60"),
+    profile: profileSelector.value ? profileSelector : void 0,
     warnings
   };
   for (const value of [cfg.apiBase, cfg.wakeBase, cfg.version, cfg.roomId, cfg.roomHandle, cfg.agentToken, cfg.agentTokenId, cfg.sessionAlias, cfg.watchEnabled]) {
@@ -31569,9 +31677,9 @@ var ParleAgentClient = class {
     const current = this.cfg.agentToken?.value;
     if (!current)
       return void 0;
-    for (const rel of [".env", join2(".parle", "credentials")]) {
+    for (const rel of [".env", join3(".parle", "credentials")]) {
       try {
-        const onDisk = readKeyValueFile(join2(this.cwd, rel))["PARLE_ROOM_AGENT_TOKEN"];
+        const onDisk = readKeyValueFile(join3(this.cwd, rel))["PARLE_ROOM_AGENT_TOKEN"];
         if (onDisk === void 0 || onDisk === "")
           continue;
         if (onDisk === current)
@@ -32117,7 +32225,7 @@ function createParleMcpServer(client = new ParleAgentClient()) {
   return server;
 }
 async function runStdio() {
-  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.0.0" } });
+  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.4" } });
   const server = createParleMcpServer(client);
   installLifecycleHandlers(client);
   await server.connect(new StdioServerTransport());
@@ -32159,14 +32267,95 @@ async function safeTool(fn) {
 function isDirectRun(metaUrl, argvPath = process.argv[1]) {
   return Boolean(argvPath) && metaUrl === pathToFileURL(argvPath).href;
 }
+function resolveWatcherEnvironment(cwd = process.cwd(), env = process.env, onWarning) {
+  const config2 = resolveConfig(cwd, env);
+  for (const warning of config2.warnings) onWarning?.(redactString(warning));
+  const roomId = config2.roomId?.value;
+  const agentToken = config2.agentToken?.value;
+  if (!roomId || !agentToken) {
+    throw new Error("required host configuration is missing. Set PARLE_PROFILE or PARLE_ROOM_ID / PARLE_ROOM_AGENT_TOKEN in env, ./.env, or ./.parle/credentials (run from the project directory)");
+  }
+  return {
+    ...env,
+    PARLE_API_BASE: config2.apiBase.value,
+    PARLE_WAKE_BASE: config2.wakeBase.value,
+    PARLE_VERSION: config2.version.value,
+    PARLE_ROOM_ID: roomId,
+    PARLE_ROOM_AGENT_TOKEN: agentToken
+  };
+}
+async function runWatcher(metaUrl, args, cwd = process.cwd(), env = process.env) {
+  const worker = join4(dirname(fileURLToPath(metaUrl)), "..", "skills", "parle", "scripts", "parle-watch-worker.sh");
+  if (!existsSync3(worker)) throw new Error("bundled watcher worker is missing; reinstall or rebuild the Claude plugin");
+  const childEnv = resolveWatcherEnvironment(cwd, env, (warning) => console.error(`Parle warning: ${warning}`));
+  childEnv.PARLE_WATCH_REQUEST_HELPER = fileURLToPath(metaUrl);
+  childEnv.PARLE_WATCH_PARENT_PID = String(process.pid);
+  const child = spawn("sh", [worker, ...args], { cwd, env: childEnv, stdio: "inherit" });
+  const forward = (signal) => child.kill(signal);
+  process.once("SIGINT", forward);
+  process.once("SIGTERM", forward);
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      process.removeListener("SIGINT", forward);
+      process.removeListener("SIGTERM", forward);
+      resolve(code ?? (signal ? 128 : 2));
+    });
+  });
+}
+async function runWatcherRequest(since) {
+  const apiBase = process.env.PARLE_API_BASE;
+  const roomId = process.env.PARLE_ROOM_ID;
+  const token = process.env.PARLE_ROOM_AGENT_TOKEN;
+  const version2 = process.env.PARLE_VERSION;
+  if (!apiBase || !roomId || !token || !version2) throw new Error("watch request configuration is missing");
+  const url2 = new URL(`/v/rooms/${encodeURIComponent(roomId)}/projection`, apiBase);
+  url2.searchParams.set("since_seq", since);
+  url2.searchParams.set("wait", "25");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4e4);
+  const parentPid = Number(process.env.PARLE_WATCH_PARENT_PID);
+  const parentMonitor = Number.isInteger(parentPid) && parentPid > 0 ? setInterval(() => {
+    try {
+      process.kill(parentPid, 0);
+    } catch {
+      controller.abort();
+    }
+  }, 500) : void 0;
+  parentMonitor?.unref();
+  try {
+    const response = await fetch(url2, {
+      headers: { Authorization: `Bearer ${token}`, "Parle-Version": version2, Connection: "close" },
+      signal: controller.signal
+    });
+    const raw = await response.text();
+    const withoutExactToken = raw.split(token).join("<redacted>");
+    await new Promise((resolve) => process.stdout.write(`${response.status}
+${redactString(withoutExactToken)}`, () => resolve()));
+  } catch {
+    await new Promise((resolve) => process.stdout.write("000\n{}", () => resolve()));
+  } finally {
+    clearTimeout(timer);
+    if (parentMonitor) clearInterval(parentMonitor);
+  }
+}
 if (isDirectRun(import.meta.url)) {
-  runStdio().catch((error51) => {
-    console.error(error51 instanceof Error ? error51.message : String(error51));
-    process.exit(1);
+  const command = process.argv[2];
+  const isRequest = command === "--parle-watch-request";
+  const task = command === "--parle-watch" ? runWatcher(import.meta.url, process.argv.slice(3)).then((code) => {
+    process.exitCode = code;
+  }) : isRequest ? runWatcherRequest(process.argv[3] ?? "0") : runStdio();
+  task.then(() => {
+    if (isRequest) process.exit(0);
+  }).catch((error51) => {
+    console.error(`Parle stopped: ${error51 instanceof Error ? error51.message : String(error51)}`);
+    process.exitCode = 2;
   });
 }
 export {
   createParleMcpServer,
   isDirectRun,
-  runStdio
+  resolveWatcherEnvironment,
+  runStdio,
+  runWatcher
 };

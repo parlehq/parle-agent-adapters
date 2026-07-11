@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.8 (2026-07-10)
+
+Bundled MCP refresh for shared credential-profile resolution. Desktop's documented env-only setup remains unchanged.
+
 ## 0.5.7 (2026-07-08)
 
 Bundled MCP refresh: `parle_status` carries the compact card.

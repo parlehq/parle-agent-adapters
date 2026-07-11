@@ -3,9 +3,12 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ParleAgentClient } from "@parlehq/agent-client";
-import { createParleMcpServer, isDirectRun } from "../dist/index.js";
+import { createParleMcpServer, isDirectRun, resolveWatcherEnvironment } from "../dist/index.js";
 
 const expectedTools = [
   "parle_affordances",
@@ -21,6 +24,36 @@ const expectedTools = [
 test("direct-run detection handles URL-encoded paths", () => {
   const path = "/tmp/Application Support/parle-mcp.js";
   assert.equal(isDirectRun(pathToFileURL(path).href, path), true);
+});
+
+test("watch launcher uses shared profile resolution and preserves direct config", () => {
+  const home = mkdtempSync(join(tmpdir(), "parle-mcp-watch-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "parle-mcp-watch-cwd-"));
+  try {
+    mkdirSync(join(home, ".parle"), { mode: 0o700 });
+    writeFileSync(join(home, ".parle", "profiles"), "[watch]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_watch_secret\napi_base = https://profile.example\n", { mode: 0o600 });
+    const profile = resolveWatcherEnvironment(cwd, { HOME: home, PARLE_PROFILE: "watch", SAFE_KEEP: "yes" });
+    assert.equal(profile.PARLE_ROOM_ID, "019f2946-aef5-77ad-a41d-747ce0fd6a1e");
+    assert.equal(profile.PARLE_ROOM_AGENT_TOKEN, "parle_agt_watch_secret");
+    assert.equal(profile.PARLE_API_BASE, "https://profile.example");
+    assert.equal(profile.SAFE_KEEP, "yes");
+    assert.throws(
+      () => resolveWatcherEnvironment(cwd, { HOME: home, PARLE_PROFILE: "watch", PARLE_ROOM_ID: "stale-direct" }),
+      /conflicts with direct configuration/,
+    );
+
+    writeFileSync(join(home, ".parle", "profiles"), "[default]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_default_secret\n", { mode: 0o600 });
+    const defaultProfile = resolveWatcherEnvironment(cwd, { HOME: home });
+    assert.equal(defaultProfile.PARLE_ROOM_AGENT_TOKEN, "parle_agt_default_secret");
+
+    const direct = resolveWatcherEnvironment(cwd, { PARLE_ROOM_ID: "room-direct", PARLE_ROOM_AGENT_TOKEN: "direct-token", PARLE_API_BASE: "https://direct.example" });
+    assert.equal(direct.PARLE_ROOM_ID, "room-direct");
+    assert.equal(direct.PARLE_ROOM_AGENT_TOKEN, "direct-token");
+    assert.equal(direct.PARLE_API_BASE, "https://direct.example");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("in-memory server maps read, send, and errors through fake client", async () => {

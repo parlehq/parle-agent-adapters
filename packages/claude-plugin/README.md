@@ -37,9 +37,18 @@ The plugin build copies `../mcp-server/dist/parle-mcp.js` into `packages/claude-
 node ${CLAUDE_PLUGIN_ROOT}/dist/parle-mcp.js
 ```
 
-Configure Parle with `PARLE_API_BASE`, `PARLE_ROOM_ID`, and `PARLE_ROOM_AGENT_TOKEN` in the Claude environment. `.mcp.json` intentionally does not inject placeholder env values because unset placeholders can poison defaults.
+Configure Parle with a personal profile by setting `PARLE_PROFILE` in the Claude environment or project `.env`:
 
-Config sources resolve in strict precedence -- process environment, then `<cwd>/.env`, then `<cwd>/.parle/credentials` -- and load once at MCP server start, except `PARLE_VERSION`: the adapter owns the default wire version, ignores persisted `.env` or `.parle/credentials` values with a warning, and honors process environment only as an advanced staging or rollback override. The plugin never writes these files. A token rotated on disk after launch does not take effect (and a stale process-env value shadows a corrected `.env`) until the Claude Code session restarts; terminal `invalid_agent_token` / `reauthorize` errors, `parle_setup`, and `parle_status` warn when the loaded token differs from the on-disk value.
+```ini
+# ~/.parle/profiles (0600)
+[work]
+room_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e
+agent_token = parle_agt_...
+```
+
+The MCP server and bundled watcher both use the shared client's atomic profile semantics. `PARLE_PROFILE` conflicts with direct room-binding values. With no explicit binding, a `[default]` section is selected when present. A catalog with no `[default]` does not select another profile implicitly. Direct `PARLE_API_BASE`, `PARLE_ROOM_ID`, and `PARLE_ROOM_AGENT_TOKEN` configuration remains supported. `.mcp.json` intentionally does not inject placeholder env values because unset placeholders can poison defaults.
+
+Config sources resolve in strict precedence: process environment, then `<cwd>/.env`, then `<cwd>/.parle/credentials`. The MCP process loads once at server start. The standalone watcher resolves again through the bundled Node shared resolver on every invocation, including each manual re-arm. `PARLE_VERSION` is adapter-owned: persisted values are ignored with a warning and only process environment can override the default. The plugin never writes these files. A token rotated on disk after MCP launch requires a Claude Code session restart, while the next watcher re-arm reads the current profile. The watcher passes the resolved token only through child environment; it never places it in argv, stdout, logs, or temporary files.
 
 Leave `PARLE_SESSION_ALIAS` unset for ordinary Claude sessions. Each process should normally use its generated ephemeral address. Set `PARLE_SESSION_ALIAS` only for a deliberately singleton named role because every new process with the same alias takes over that route and supersedes the previous session.
 

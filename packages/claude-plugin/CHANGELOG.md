@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.5.16 (2026-07-10)
+
+Claude MCP and standalone watcher profile parity.
+
+- The rebuilt MCP bundle now includes shared `PARLE_PROFILE` resolution, including atomic conflicts and `[default]` selection.
+- Every watcher start and manual re-arm runs that same resolver in Node. Direct config remains supported.
+- The resolver supplies the token only in child environment. A Node request helper constructs Authorization internally, removing token-bearing curl argv and response temp files.
+
 ## 0.5.15 (2026-07-09)
 
 Watcher liveness detects recycled writer pids via process-start-time verification (adapters#22 residual; script-only, no MCP bundle change).

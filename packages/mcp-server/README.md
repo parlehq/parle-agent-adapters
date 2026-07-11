@@ -19,6 +19,12 @@ MCP v1 tools:
 
 `parle_request` is intentionally deferred from MCP v1.
 
+## Configuration
+
+The stdio server uses the shared client resolver. It supports direct process env, project `.env`, and project `.parle/credentials` configuration, plus atomic `PARLE_PROFILE` bindings from `~/.parle/profiles`. An explicit profile cannot be mixed with direct room-binding values. With no explicit binding, `[default]` is selected when present.
+
+The bundled Claude watcher launcher is also hosted in this artifact. Every watcher start resolves configuration afresh, then passes the agent token only in the worker child environment. The request helper constructs authentication inside Node, so the token is never placed in argv, stdout, logs, or temporary files.
+
 ## Session lifecycle
 
 The stdio entrypoint constructs a `ParleAgentClient` with runtime publishing enabled and, when `PARLE_ROOM_ID` and `PARLE_ROOM_AGENT_TOKEN` are configured, eagerly bootstraps the room agent session in the background at startup. Bootstrap is single-flight (eager startup, racing tool calls, and 401 rebootstrap share one in-flight mint) with exponential backoff on failure (5s doubling to a 60s cap, recorded as `bootstrapState`/`lastBootstrapError`/`nextRetryAt` on runtime state).

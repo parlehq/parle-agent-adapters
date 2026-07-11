@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,8 +29,8 @@ const haveStartVerify = canVerifyStart();
 function stubServer(body) {
   return new Promise((resolveServer) => {
     const server = createServer((req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(body));
+      res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
+      res.end(JSON.stringify(typeof body === "function" ? body(req) : body));
     });
     server.listen(0, "127.0.0.1", () => resolveServer(server));
   });
@@ -60,15 +60,17 @@ function writeSnapshot(cwd, agentSessionId, overrides = {}) {
 }
 
 function runWatch(cwd, apiBase, args, extraEnv = {}) {
+  const env = {
+    ...process.env,
+    PARLE_API_BASE: apiBase,
+    PARLE_ROOM_ID: "room-1",
+    PARLE_ROOM_AGENT_TOKEN: "parle_agt_test",
+    ...extraEnv,
+  };
+  for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
   const child = spawn("sh", [script, ...args], {
     cwd,
-    env: {
-      ...process.env,
-      PARLE_API_BASE: apiBase,
-      PARLE_ROOM_ID: "room-1",
-      PARLE_ROOM_AGENT_TOKEN: "parle_agt_test",
-      ...extraEnv,
-    },
+    env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
@@ -89,6 +91,67 @@ async function assertStillWatching(watch) {
   watch.child.kill("SIGKILL");
   await watch.exited;
 }
+
+test("watch resolves a named profile on every manual re-arm without exposing its token", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "parle-watch-profile-project-"));
+  const home = mkdtempSync(join(tmpdir(), "parle-watch-profile-home-"));
+  const seenAuth = [];
+  const server = await stubServer((req) => {
+    seenAuth.push(req.headers.authorization);
+    return { messages: [{ seq: 2, author: { agent_session_id: "session-other" }, addressing: { kind: "unaddressed" } }], watermark: 2 };
+  });
+  const profilePath = join(home, ".parle", "profiles");
+  const roomId = "019f2946-aef5-77ad-a41d-747ce0fd6a1e";
+  const firstToken = "parle_agt_profile_first_secret";
+  const secondToken = "parle_agt_profile_second_secret";
+  try {
+    mkdirSync(dirname(profilePath), { recursive: true, mode: 0o700 });
+    writeFileSync(join(cwd, ".env"), "PARLE_PROFILE=claude\n");
+    writeFileSync(profilePath, `[claude]\nroom_id = ${roomId}\nagent_token = ${firstToken}\napi_base = http://127.0.0.1:${server.address().port}\n`, { mode: 0o600 });
+    const cleanEnv = { HOME: home, PARLE_API_BASE: undefined, PARLE_ROOM_ID: undefined, PARLE_ROOM_AGENT_TOKEN: undefined, PARLE_PROFILE: undefined };
+    const first = runWatch(cwd, "unused", ["1"], cleanEnv);
+    assert.equal(await first.exited, 0);
+    assert.equal(first.out().includes(firstToken), false);
+    assert.equal(first.err().includes(firstToken), false);
+
+    writeFileSync(profilePath, `[claude]\nroom_id = ${roomId}\nagent_token = ${secondToken}\napi_base = http://127.0.0.1:${server.address().port}\n`, { mode: 0o600 });
+    const second = runWatch(cwd, "unused", ["1"], cleanEnv);
+    assert.equal(await second.exited, 0);
+    assert.equal(second.out().includes(secondToken), false);
+    assert.equal(second.err().includes(secondToken), false);
+    assert.deepEqual(seenAuth, [`Bearer ${firstToken}`, `Bearer ${secondToken}`]);
+  } finally {
+    server.close();
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("watch preserves direct configuration and keeps the token out of child argv", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "parle-watch-direct-"));
+  const token = "parle_agt_direct_argv_secret";
+  let auth;
+  const server = await stubServer((req) => {
+    auth = req.headers.authorization;
+    return { messages: [{ seq: 2 }], watermark: 2 };
+  });
+  try {
+    const watch = runWatch(cwd, `http://127.0.0.1:${server.address().port}`, ["1"], { PARLE_ROOM_AGENT_TOKEN: token });
+    assert.equal(await watch.exited, 0);
+    assert.equal(auth, `Bearer ${token}`);
+    assert.equal(watch.out().includes(token), false);
+    assert.equal(watch.err().includes(token), false);
+    const sources = [
+      readFileSync(script, "utf8"),
+      readFileSync(resolve(root, "skills/parle/scripts/parle-watch-worker.sh"), "utf8"),
+    ].join("\n");
+    assert.doesNotMatch(sources, /Authorization: Bearer \$PARLE_ROOM_AGENT_TOKEN/);
+    assert.doesNotMatch(sources, /mktemp/);
+  } finally {
+    server.close();
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
 
 test("watch holds with a note when the watched session was never present (era gate)", { skip: !havePython && "python3/kill unavailable" }, async () => {
   const cwd = mkdtempSync(join(tmpdir(), "parle-watch-"));

@@ -29,12 +29,14 @@ test("adapter DEFAULT_VERSION constants stay in lockstep with the API fixture", 
   const clientSrc = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
   const piSrc = readFileSync(new URL("../../pi-extension/src/index.ts", import.meta.url), "utf8");
   const watchScript = readFileSync(new URL("../../claude-plugin/skills/parle/scripts/parle-watch.sh", import.meta.url), "utf8");
+  const mcpSrc = readFileSync(new URL("../../mcp-server/src/index.ts", import.meta.url), "utf8");
   const apiVersion = JSON.parse(readFileSync(new URL("fixtures/api-version.json", import.meta.url), "utf8"));
   assert.equal(DEFAULT_VERSION, apiVersion.current);
   assert.equal(apiVersion.supported.includes(DEFAULT_VERSION), true);
   assert.match(clientSrc, new RegExp(`DEFAULT_VERSION = "${DEFAULT_VERSION}"`));
   assert.match(piSrc, new RegExp(`DEFAULT_VERSION = "${DEFAULT_VERSION}"`));
-  assert.match(watchScript, new RegExp(`PARLE_VERSION:=${DEFAULT_VERSION}`));
+  assert.match(watchScript, /--parle-watch/);
+  assert.match(mcpSrc, /PARLE_VERSION: config\.version\.value/);
 });
 
 test("client boundary scan ignores prose and detects forbidden import specifiers", () => {
