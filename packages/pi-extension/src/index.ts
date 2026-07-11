@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { catalogGitExposureWarning, loadProfile, parseProfiles, profileCatalogHasProfile, resolveProfileCatalogPath, type CredentialProfile } from "@parlehq/agent-client";
+import { catalogGitExposureWarning, loadProfile, parseProfiles, profileCatalogHasProfile, resolveProfileCatalogPath, summarizeSendDelivery, type CredentialProfile } from "@parlehq/agent-client";
 import { Type } from "typebox";
 const EXTENSION_ID = "25-parle";
 const PI_EXTENSION_VERSION = "0.1.11";
@@ -1280,31 +1280,6 @@ function inboundBatchPrompt(messages: any[], responsePreamble?: string): string 
 
 function promptFitsResponsiveBatch(messages: any[], responsePreamble?: string): boolean {
   return Buffer.byteLength(inboundBatchPrompt(messages, responsePreamble), "utf8") <= READ_LIMIT_BYTES;
-}
-
-// @parle-interpretation parlehq/parle-agent-adapters#13
-// Delete this Pi-local copy during the shared-client refactor.
-function summarizeSendDelivery(details: any): any {
-  const moderation = details?.moderation;
-  if (!moderation || typeof moderation !== "object") return undefined;
-  const steps = Array.isArray(moderation.steps) ? moderation.steps : [];
-  if (moderation.scan === "skipped" && steps.length === 0) {
-    return {
-      state: "accepted_scan_skipped",
-      message: "Message accepted. This room/config skipped moderation scanning, so do not describe it as awaiting moderation completion.",
-    };
-  }
-  if (moderation.held === true) {
-    return {
-      state: "held_for_moderation",
-      message: moderation.reason || "Message accepted but held for moderation completion.",
-      nextStep: typeof details?.seq === "number" ? `Poll parle_read or parle_inbox around seq ${details.seq}; if held_backlog drains and the row never appears, it was blocked.` : "Poll parle_read or parle_inbox; if held_backlog drains and the row never appears, it was blocked.",
-    };
-  }
-  if (moderation.delivered === true) {
-    return { state: "delivered", message: "Message accepted and delivered." };
-  }
-  return undefined;
 }
 
 async function ackResponsiveMessage(cfg: ParleConfig, message: any, signal?: AbortSignal) {

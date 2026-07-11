@@ -969,3 +969,19 @@ test("parle_send treats direct addressing failures as non-retryable with hint", 
   assert.match(result.details.hint, /target is a live room participant/);
   assert.match(result.details.error, /address not deliverable/);
 });
+
+test("Pi delegates delivery summary wording and precedence to agent client", async () => {
+  const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+  assert.match(source, /summarizeSendDelivery[^\n]*from "@parlehq\/agent-client"/);
+  assert.doesNotMatch(source, /function summarizeSendDelivery/);
+  const { summarizeSendDelivery } = await import("@parlehq/agent-client");
+  assert.deepEqual(summarizeSendDelivery({ moderation: { held: true, delivered: false, scan: "skipped", steps: [] } }), {
+    state: "accepted_scan_skipped",
+    message: "Message accepted. This room/config skipped moderation scanning, so do not describe it as awaiting moderation completion.",
+  });
+  assert.deepEqual(summarizeSendDelivery({ seq: 9, moderation: { held: true, reason: "queued" } }), {
+    state: "held_for_moderation", message: "queued", nextStep: "Poll parle_read or parle_inbox around seq 9; if held_backlog drains and the row never appears, it was blocked.",
+  });
+  assert.deepEqual(summarizeSendDelivery({ moderation: { delivered: true } }), { state: "delivered", message: "Message accepted and delivered." });
+  assert.equal(summarizeSendDelivery({}), undefined);
+});
