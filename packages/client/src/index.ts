@@ -271,7 +271,7 @@ function parseJsonMaybe(text: string): any {
   }
 }
 
-function formatVersionErrorHint(cfg: ParleConfig, errorObj: any): string {
+export function formatVersionErrorHint(cfg: { version: { value?: string; source: string } }, errorObj: any): string {
   const sent = cfg.version.value || DEFAULT_VERSION;
   const supported = Array.isArray(errorObj?.supported) ? errorObj.supported.join(", ") : typeof errorObj?.supported === "string" ? errorObj.supported : undefined;
   const current = typeof errorObj?.current === "string" ? errorObj.current : undefined;

@@ -11,6 +11,7 @@ import {
   ERROR_REGISTRY,
   ERROR_SCOPES,
   ParleAgentClient,
+  formatVersionErrorHint,
   addressingWarning,
   assertSafeBase,
   capProjectionMessages,
@@ -882,4 +883,9 @@ test("default profile is selected when no explicit binding is configured", () =>
     rmSync(home, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test("version error hint preserves supported-version precedence", () => {
+  const cfg = { version: { value: "old", source: "env" } };
+  assert.equal(formatVersionErrorHint(cfg, { supported: ["new"], current: "also-new" }), " Sent Parle-Version old from env; adapter default is 2026-07-07. Server supports new. Unset the stale PARLE_VERSION override or upgrade the adapter.");
 });

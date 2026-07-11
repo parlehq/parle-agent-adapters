@@ -2,10 +2,10 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { catalogGitExposureWarning, loadProfile, parseKeyValueFile, parseProfiles, profileCatalogHasProfile, resolveProfileCatalogPath, summarizeSendDelivery, type CredentialProfile } from "@parlehq/agent-client";
+import { catalogGitExposureWarning, loadProfile, formatVersionErrorHint, parseKeyValueFile, parseProfiles, profileCatalogHasProfile, resolveProfileCatalogPath, summarizeSendDelivery, type CredentialProfile } from "@parlehq/agent-client";
 import { Type } from "typebox";
 const EXTENSION_ID = "25-parle";
-const PI_EXTENSION_VERSION = "0.1.13";
+const PI_EXTENSION_VERSION = "0.1.14";
 const RUNTIME_SCHEMA_VERSION = 1;
 const DEFAULT_API_BASE = "https://api.parle.sh";
 const DEFAULT_VERSION = "2026-07-07";
@@ -291,15 +291,6 @@ function redactedValue(value?: ConfigValue) {
     secret: value.secret === true,
     warning: value.warning,
   };
-}
-
-function formatVersionErrorHint(cfg: ParleConfig, errorObj: any): string {
-  const sent = cfg.version.value || DEFAULT_VERSION;
-  const supported = Array.isArray(errorObj?.supported) ? errorObj.supported.join(", ") : typeof errorObj?.supported === "string" ? errorObj.supported : undefined;
-  const current = typeof errorObj?.current === "string" ? errorObj.current : undefined;
-  const server = supported ? ` Server supports ${supported}.` : current ? ` Server current version is ${current}.` : "";
-  const action = cfg.version.source === "default" ? "Upgrade the adapter." : "Unset the stale PARLE_VERSION override or upgrade the adapter.";
-  return ` Sent Parle-Version ${sent} from ${cfg.version.source}; adapter default is ${DEFAULT_VERSION}.${server} ${action}`;
 }
 
 function redactString(input: string): string {
