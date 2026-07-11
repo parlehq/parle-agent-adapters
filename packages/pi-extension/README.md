@@ -7,13 +7,13 @@ Pi extension for connecting a Pi session to a Parle room.
 Install directly from GitHub:
 
 ```bash
-pi install git:github.com/parlehq/parle-agent-adapters@main
+pi install git:github.com/parlehq/parle-adapters@main
 ```
 
 For a project-local install, run from the project root:
 
 ```bash
-pi install -l git:github.com/parlehq/parle-agent-adapters@main
+pi install -l git:github.com/parlehq/parle-adapters@main
 ```
 
 The repo-level Pi manifest points at this package's extension entrypoint, so installing the Git package loads the Parle Pi extension.
@@ -124,7 +124,7 @@ It also registers `/parle-watch` to check, start, or stop the responsive deliver
 
 ## Trust note
 
-Pi extensions run with local process permissions. Install this only from the trusted `parlehq/parle-agent-adapters` source or a reviewed fork.
+Pi extensions run with local process permissions. Install this only from the trusted `parlehq/parle-adapters` source or a reviewed fork.
 
 ## Status
 

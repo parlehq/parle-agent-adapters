@@ -1,7 +1,7 @@
 # Npm Publication Design
 
 Status: design iteration for issue #1  
-Issue: https://github.com/parlehq/parle-agent-adapters/issues/1  
+Issue: https://github.com/parlehq/parle-adapters/issues/1
 Date: 2026-07-04
 
 ## Objective
@@ -32,7 +32,7 @@ This keeps the currently useful package installable without forcing empty packag
 ### Current install path
 
 ```bash
-pi install git:github.com/parlehq/parle-agent-adapters@main
+pi install git:github.com/parlehq/parle-adapters@main
 ```
 
 ### Target npm install path

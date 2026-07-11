@@ -9,7 +9,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/parlehq/parle-agent-adapters.git"
+    "url": "https://github.com/parlehq/parle-adapters.git"
   },
   "license": "MIT",
   "compatibility": {

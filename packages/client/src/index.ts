@@ -490,7 +490,7 @@ export function addressingWarning(body: string, to?: string): string | undefined
   return "Body @mentions do not address a Parle message. This message was sent unaddressed and will not wake a peer watcher. Pass to: \"@principal.agent\" or to: \"@principal.agent.session\" for responsive delivery.";
 }
 
-// @parle-interpretation parlehq/parle-agent-adapters#13
+// @parle-interpretation parlehq/parle-adapters#13
 // Remove or narrow this when the API exposes canonical delivery state semantics.
 export function summarizeSendDelivery(details: any): SendDeliveryStatus | undefined {
   const moderation = details?.moderation;

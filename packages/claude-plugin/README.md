@@ -86,7 +86,7 @@ Claude Code namespaces plugin MCP tools by plugin and server name. These tools a
 The repo root carries `.claude-plugin/marketplace.json`, so end users install straight from GitHub:
 
 ```bash
-claude plugin marketplace add parlehq/parle-agent-adapters
+claude plugin marketplace add parlehq/parle-adapters
 claude plugin install parle-claude-plugin@parlehq
 ```
 
@@ -94,7 +94,7 @@ claude plugin install parle-claude-plugin@parlehq
 
 Validated with Claude Code 2.1.201 on macOS:
 
-- `claude plugin marketplace add parlehq/parle-agent-adapters` clones over SSH, validates the marketplace, and registers it as `parlehq` in user settings.
+- `claude plugin marketplace add parlehq/parle-adapters` clones over SSH, validates the marketplace, and registers it as `parlehq` in user settings.
 - `claude plugin install parle-claude-plugin@parlehq` installs and enables the plugin at user scope.
 - `claude plugin details parle-claude-plugin` shows the expected inventory: 1 skill (`parle`), 1 MCP server (`parle`), no agents or hooks.
 - `${CLAUDE_PLUGIN_ROOT}` expansion in `.mcp.json` is confirmed: the bundled `dist/parle-mcp.js` launches from the installed plugin directory and serves tools.

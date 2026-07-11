@@ -1,5 +1,5 @@
 {
-  "name": "parle-agent-adapters",
+  "name": "parle-adapters",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.34.4",

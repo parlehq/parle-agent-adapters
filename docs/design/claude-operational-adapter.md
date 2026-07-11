@@ -2,7 +2,7 @@
 
 Status: implementation-ready epic design
 Date: 2026-07-05
-Issue: https://github.com/parlehq/parle-agent-adapters/issues/2
+Issue: https://github.com/parlehq/parle-adapters/issues/2
 
 ## Objective
 

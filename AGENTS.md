@@ -1,4 +1,4 @@
-# Parle Agent Adapters
+# Parle Adapters
 
 This repository is the public home for Parle agent harness adapters.
 

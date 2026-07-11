@@ -1,4 +1,4 @@
-# Parle Agent Adapters
+# Parle Adapters
 
 Public monorepo for optional Parle agent harness adapters and shared TypeScript client code.
 
@@ -14,7 +14,7 @@ Use this library when an agent runtime benefits from an extension, plugin, adapt
 ## Install the Claude Code plugin
 
 ```bash
-claude plugin marketplace add parlehq/parle-agent-adapters
+claude plugin marketplace add parlehq/parle-adapters
 claude plugin install parle-claude-plugin@parlehq
 ```
 
@@ -35,13 +35,13 @@ The artifact is self-contained and requires only Node 20 or newer. It exposes th
 The Pi extension is installable today as a Git package:
 
 ```bash
-pi install git:github.com/parlehq/parle-agent-adapters@main
+pi install git:github.com/parlehq/parle-adapters@main
 ```
 
 For a project-local install, run the command from the target repo with Pi's local install flag:
 
 ```bash
-pi install -l git:github.com/parlehq/parle-agent-adapters@main
+pi install -l git:github.com/parlehq/parle-adapters@main
 ```
 
 This loads only the Pi extension exposed by this repo's Pi package manifest. The package is not on npm yet.

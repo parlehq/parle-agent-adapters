@@ -2,9 +2,9 @@
 
 Status: design draft for adversarial review
 Date: 2026-07-06
-Owner repo: `parlehq/parle-agent-adapters`
+Owner repo: `parlehq/parle-adapters`
 Core counterpart needed: `parlehq/parle` API and discovery doctrine
-Related: `adapter-maintenance-strategy.md`, `package-architecture.md`, `claude-adapter-update-plan.md`, `claude-desktop-mcpb-package.md`, `parlehq/parle#427`, `parlehq/parle-agent-adapters#13`
+Related: `adapter-maintenance-strategy.md`, `package-architecture.md`, `claude-adapter-update-plan.md`, `claude-desktop-mcpb-package.md`, `parlehq/parle#427`, `parlehq/parle-adapters#13`
 
 ## Why this exists
 
@@ -16,7 +16,7 @@ The working rule is:
 
 > Fix meaning at the API layer first. Use adapters to make harnesses convenient, not to define what Parle means.
 
-The reverted no-scan masking fix is the template. The adapter could hide confusing moderation internals, but that would only help Parle-maintained wrappers and would require repacking installed artifacts. The better fix was `parlehq/parle#427`: make no-scan send responses unambiguous at the API and discovery layer so every client benefits. Adapter follow-through is tracked in `parlehq/parle-agent-adapters#13`.
+The reverted no-scan masking fix is the template. The adapter could hide confusing moderation internals, but that would only help Parle-maintained wrappers and would require repacking installed artifacts. The better fix was `parlehq/parle#427`: make no-scan send responses unambiguous at the API and discovery layer so every client benefits. Adapter follow-through is tracked in `parlehq/parle-adapters#13`.
 
 ## Layer model
 
@@ -139,10 +139,10 @@ Interpretation is permitted only when all are true:
 Current ledger:
 
 - Helper: `summarizeSendDelivery` in `@parlehq/agent-client`
-  - Marker: `@parle-interpretation parlehq/parle-agent-adapters#13`
+  - Marker: `@parle-interpretation parlehq/parle-adapters#13`
   - Layer: L1
   - Meaning interpreted: moderation envelope to send delivery status
-  - Upstream issue: `parlehq/parle#427`, adapter follow-through `parlehq/parle-agent-adapters#13`
+  - Upstream issue: `parlehq/parle#427`, adapter follow-through `parlehq/parle-adapters#13`
   - Removal condition: adapters pass through server-authored `moderation.delivery_state` when present and keep only legacy fallback for older API deployments.
   - Reason it still exists: the API fix landed, but adapter follow-through still needs to retire local no-scan inference debt.
 - Helper: `addressingWarning` and `bodyLooksLikeAddressedText` in `@parlehq/agent-client`
@@ -181,11 +181,11 @@ Current ledger:
   - Removal condition: Parle API error bodies expose canonical retryability or documented error-code semantics.
   - Reason it still exists: adapters need a consistent retry hint until the API makes retryability explicit.
 - Helper: Pi-local `summarizeSendDelivery`
-  - Marker: `@parle-interpretation parlehq/parle-agent-adapters#13`
+  - Marker: `@parle-interpretation parlehq/parle-adapters#13`
   - Layer: L2 legacy copy
   - Meaning interpreted: same as shared-client `summarizeSendDelivery`.
-  - Upstream issue: `parlehq/parle-agent-adapters#13`
-  - Removal condition: Pi refactor onto `@parlehq/agent-client`, then shared delivery-state passthrough from `parlehq/parle-agent-adapters#13`.
+  - Upstream issue: `parlehq/parle-adapters#13`
+  - Removal condition: Pi refactor onto `@parlehq/agent-client`, then shared delivery-state passthrough from `parlehq/parle-adapters#13`.
   - Reason it still exists: Pi refactor is still pending, so the copy is explicitly marked as temporary debt.
 
 Ledger rules:
@@ -232,7 +232,7 @@ These strings should have one canonical source and byte-parity tests across surf
 - untrusted peer content and ADR-0036 posture
 - direct addressing rules
 - idempotency retry rule
-- no-scan and moderation state guidance after core `parlehq/parle#427` and adapter follow-through `parlehq/parle-agent-adapters#13`
+- no-scan and moderation state guidance after core `parlehq/parle#427` and adapter follow-through `parlehq/parle-adapters#13`
 - setup and missing-config diagnostics
 
 Preference order:
@@ -462,7 +462,7 @@ Adapter repo owns:
 - wrapper and bridge CI gates
 - thin-wrapper enforcement
 
-Falsifiable test: a third-party integrator should be able to build a correct direct HTTP client without reading `parle-agent-adapters`.
+Falsifiable test: a third-party integrator should be able to build a correct direct HTTP client without reading `parle-adapters`.
 
 ## Open design tension
 
@@ -479,7 +479,7 @@ API-first should not freeze UX. It should prevent semantics from leaking into ev
 
 ## Immediate next steps
 
-1. Treat core `parlehq/parle#427` plus adapter `parlehq/parle-agent-adapters#13` as the exemplar API-first loop for no-scan delivery ambiguity.
+1. Treat core `parlehq/parle#427` plus adapter `parlehq/parle-adapters#13` as the exemplar API-first loop for no-scan delivery ambiguity.
 2. Keep ADR-0060 in core as the counterpart doctrine and update this adapter doctrine when the layer contract changes.
 3. File or maintain core issues for conformance fixtures, canonical guidance strings, token format registry, error taxonomy, session lifecycle, wake/drain/ack spec, ADR-0036 byte spec, and `Parle-Version` lifecycle.
 4. Keep interpretation marker comments on existing interpretation helpers in `@parlehq/agent-client` and Pi until Pi is fully refactored.
