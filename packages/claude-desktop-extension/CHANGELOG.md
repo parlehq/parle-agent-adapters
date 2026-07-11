@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.10 (2026-07-11)
+
+Bundled MCP refresh clarifying agent-session expiry recovery.
+
+- `rebootstrap` now states that expiry ends only the current session incarnation. `parle_connect` creates a replacement with the still-valid agent token; `reauthorize` remains reserved for invalid or revoked agent tokens.
+
 ## 0.5.9 (2026-07-10)
 
 Bundled MCP refresh: `.parle/credentials` removed, `PARLE_PROFILES_PATH` catalog override.

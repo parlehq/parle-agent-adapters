@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.18 (2026-07-11)
+
+Bundled MCP refresh clarifying agent-session expiry recovery.
+
+- `rebootstrap` now states that expiry ends only the current session incarnation. `parle_connect` creates a replacement with the still-valid agent token; `reauthorize` remains reserved for invalid or revoked agent tokens.
+
+
 ## 0.5.17 (2026-07-10)
 
 `.parle/credentials` is gone; `PARLE_PROFILES_PATH` relocates the profile catalog (bundled artifact refresh; gate constraints from galexc-intercom seq 853/858).

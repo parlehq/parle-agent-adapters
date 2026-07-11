@@ -31294,8 +31294,8 @@ var DEFAULT_WAKE_BASE = DEFAULT_API_BASE;
 var DEFAULT_VERSION = "2026-07-07";
 var DEFAULT_READ_MESSAGE_LIMIT = 50;
 var READ_LIMIT_BYTES = 256 * 1024;
-var CONNECT_NEXT_GUIDANCE = "Render compactText verbatim to the user as the connection card, then arm responsive delivery before going idle: host watcher if available, otherwise /v/agent/wake SSE followed by responsive-delivery?wait=0 drain and ack. Hosts with the parle skill arm the watcher first and add its status line to the card. Do not poll with waitSeconds.";
-var SESSION_ESTABLISHED_NEXT_GUIDANCE = "Report the session address and expiry, then arm responsive delivery before going idle: host watcher if available, otherwise /v/agent/wake SSE followed by responsive-delivery?wait=0 drain and ack. Do not poll with waitSeconds.";
+var CONNECT_NEXT_GUIDANCE = "Render compactText verbatim to the user as the connection card, then arm responsive delivery before going idle: host watcher if available, otherwise /v/agent/wake SSE followed by responsive-delivery?wait=0 drain and ack. Agent-session expiry ends only this session incarnation: parle_connect uses the still-valid agent token to create a replacement session. Reauthorize only when the agent token is invalid or revoked. Hosts with the parle skill arm the watcher first and add its status line to the card. Do not poll with waitSeconds.";
+var SESSION_ESTABLISHED_NEXT_GUIDANCE = "Report the session address and expiry, then arm responsive delivery before going idle: host watcher if available, otherwise /v/agent/wake SSE followed by responsive-delivery?wait=0 drain and ack. Expiry ends only this session incarnation; parle_connect creates a replacement with the still-valid agent token. Do not poll with waitSeconds.";
 var ParleApiError = class extends Error {
   status;
   code;
@@ -31492,7 +31492,7 @@ function terminalStatusFor(error51) {
     case "reauthorize":
       return "Parle stopped: agent token is invalid or revoked; reauthorize the agent.";
     case "rebootstrap":
-      return "Parle stopped: agent session is dead; reconnect with parle_connect and re-arm.";
+      return "Parle stopped: this agent session ended; parle_connect can create a replacement with the still-valid agent token, then re-arm.";
     case "backoff":
       return `Parle paused: retry scheduled after ${formatDuration(error51.retryAfterMs ?? 0)} (${error51.code || "backoff"}).`;
     case "stop":
