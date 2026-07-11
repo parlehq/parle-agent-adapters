@@ -5,7 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { catalogGitExposureWarning, loadProfile, parseProfiles, profileCatalogHasProfile, resolveProfileCatalogPath, summarizeSendDelivery, type CredentialProfile } from "@parlehq/agent-client";
 import { Type } from "typebox";
 const EXTENSION_ID = "25-parle";
-const PI_EXTENSION_VERSION = "0.1.11";
+const PI_EXTENSION_VERSION = "0.1.12";
 const RUNTIME_SCHEMA_VERSION = 1;
 const DEFAULT_API_BASE = "https://api.parle.sh";
 const DEFAULT_VERSION = "2026-07-07";

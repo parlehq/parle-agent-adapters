@@ -181,7 +181,7 @@ function summarizeSendDelivery(details) {
 // src/index.ts
 import { Type } from "typebox";
 var EXTENSION_ID = "25-parle";
-var PI_EXTENSION_VERSION = "0.1.11";
+var PI_EXTENSION_VERSION = "0.1.12";
 var RUNTIME_SCHEMA_VERSION2 = 1;
 var DEFAULT_API_BASE = "https://api.parle.sh";
 var DEFAULT_VERSION = "2026-07-07";
