@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -68,20 +69,16 @@ test("PARLE_VERSION is adapter-owned unless explicitly set in process env", () =
   const cwd = mkdtempSync(join(tmpdir(), "parle-version-config-"));
   try {
     writeFileSync(join(cwd, ".env"), "PARLE_VERSION=from-dotenv\n");
-    mkdirSync(join(cwd, ".parle"));
-    writeFileSync(join(cwd, ".parle", "credentials"), "PARLE_VERSION=from-credentials\n");
     const defaultCfg = resolveConfig(cwd, {});
     assert.equal(defaultCfg.version.value, "2026-07-07");
     assert.equal(defaultCfg.version.source, "default");
     assert.match(defaultCfg.warnings.join("\n"), /Ignoring PARLE_VERSION from \.env/);
-    assert.match(defaultCfg.warnings.join("\n"), /Ignoring stale PARLE_VERSION from \.parle\/credentials/);
 
     const envCfg = resolveConfig(cwd, { PARLE_VERSION: "from-env" });
     assert.equal(envCfg.version.value, "from-env");
     assert.equal(envCfg.version.source, "env");
     assert.match(envCfg.warnings.join("\n"), /process environment/);
     assert.doesNotMatch(envCfg.warnings.join("\n"), /Ignoring PARLE_VERSION from \.env/);
-    assert.doesNotMatch(envCfg.warnings.join("\n"), /Ignoring stale PARLE_VERSION from \.parle\/credentials/);
 
     // An env value equal to the adapter default is not an override: no warning,
     // but provenance stays honest (env-snapshotting hosts hit this constantly).
@@ -91,7 +88,6 @@ test("PARLE_VERSION is adapter-owned unless explicitly set in process env", () =
     assert.doesNotMatch(sameCfg.warnings.join("\n"), /process environment/);
 
     rmSync(join(cwd, ".env"));
-    rmSync(join(cwd, ".parle", "credentials"));
     const cleanCfg = resolveConfig(cwd, {});
     assert.equal(cleanCfg.version.value, "2026-07-07");
     assert.equal(cleanCfg.version.source, "default");
@@ -730,12 +726,16 @@ test("401 without on-disk divergence carries no stale-token hint", async () => {
   }
 });
 
-test("matching .env shadows a stale .parle/credentials in the divergence check", () => {
+test("a legacy .parle/credentials file is inert for config and divergence checks", () => {
   const dir = mkdtempSync(join(tmpdir(), "parle-client-shadow-"));
   try {
     writeFileSync(join(dir, ".env"), "PARLE_ROOM_AGENT_TOKEN=same-token\n");
     mkdirSync(join(dir, ".parle"));
-    writeFileSync(join(dir, ".parle", "credentials"), "PARLE_ROOM_AGENT_TOKEN=stale-leftover\n");
+    writeFileSync(join(dir, ".parle", "credentials"), "PARLE_ROOM_AGENT_TOKEN=stale-leftover\nPARLE_ROOM_ID=legacy-room\n");
+    const cfg = resolveConfig(dir, {});
+    assert.equal(cfg.roomId?.value, undefined);
+    assert.equal(cfg.agentToken?.value, "same-token");
+    assert.equal(cfg.agentToken?.source, ".env");
     const client = new ParleAgentClient({
       cwd: dir,
       env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "same-token" },
@@ -786,16 +786,16 @@ test("profile selects an atomic room binding from the personal catalog", () => {
   }
 });
 
-test("profile falls back to project-local catalog", () => {
-  const home = mkdtempSync(join(tmpdir(), "parle-profile-project-fallback-home-"));
-  const cwd = mkdtempSync(join(tmpdir(), "parle-profile-project-fallback-"));
+test("PARLE_PROFILES_PATH replaces the default catalog and resolves relative to cwd", () => {
+  const home = mkdtempSync(join(tmpdir(), "parle-profiles-path-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "parle-profiles-path-project-"));
   try {
     mkdirSync(join(cwd, ".parle"), { mode: 0o700 });
-    writeFileSync(join(cwd, ".parle", "profiles"), "[local]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_project_token\n", { mode: 0o600 });
-    writeFileSync(join(cwd, ".env"), "PARLE_PROFILE=local\n");
+    writeFileSync(join(cwd, ".parle", "team-profiles"), "[local]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_override_token\n", { mode: 0o600 });
+    writeFileSync(join(cwd, ".env"), "PARLE_PROFILES_PATH=./.parle/team-profiles\nPARLE_PROFILE=local\n");
     const cfg = resolveConfig(cwd, { HOME: home });
     assert.equal(cfg.profile?.value, "local");
-    assert.equal(cfg.agentToken?.value, "parle_agt_project_token");
+    assert.equal(cfg.agentToken?.value, "parle_agt_override_token");
     assert.equal(cfg.agentToken?.source, "profile:local");
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -803,17 +803,35 @@ test("profile falls back to project-local catalog", () => {
   }
 });
 
-test("personal profile catalog wins over project-local catalog", () => {
-  const home = mkdtempSync(join(tmpdir(), "parle-profile-precedence-home-"));
-  const cwd = mkdtempSync(join(tmpdir(), "parle-profile-precedence-project-"));
+test("PARLE_PROFILES_PATH is exclusive: the default catalog is never layered in", () => {
+  const home = mkdtempSync(join(tmpdir(), "parle-profiles-exclusive-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "parle-profiles-exclusive-project-"));
   try {
     mkdirSync(join(home, ".parle"), { mode: 0o700 });
     mkdirSync(join(cwd, ".parle"), { mode: 0o700 });
     writeFileSync(join(home, ".parle", "profiles"), "[shared]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_personal_token\n", { mode: 0o600 });
-    writeFileSync(join(cwd, ".parle", "profiles"), "[shared]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_project_token\n", { mode: 0o600 });
-    writeFileSync(join(cwd, ".env"), "PARLE_PROFILE=shared\n");
-    const cfg = resolveConfig(cwd, { HOME: home });
-    assert.equal(cfg.agentToken?.value, "parle_agt_personal_token");
+    writeFileSync(join(cwd, ".parle", "team-profiles"), "[other]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_override_token\n", { mode: 0o600 });
+    writeFileSync(join(cwd, ".env"), "PARLE_PROFILES_PATH=./.parle/team-profiles\nPARLE_PROFILE=shared\n");
+    assert.throws(() => resolveConfig(cwd, { HOME: home }), /Parle profile shared was not found in .*team-profiles/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a catalog inside a git work tree warns unless git-ignored", () => {
+  const home = mkdtempSync(join(tmpdir(), "parle-profiles-git-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "parle-profiles-git-project-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd });
+    mkdirSync(join(cwd, ".parle"), { mode: 0o700 });
+    writeFileSync(join(cwd, ".parle", "team-profiles"), "[local]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_override_token\n", { mode: 0o600 });
+    writeFileSync(join(cwd, ".env"), "PARLE_PROFILES_PATH=./.parle/team-profiles\nPARLE_PROFILE=local\n");
+    const exposed = resolveConfig(cwd, { HOME: home });
+    assert.match(exposed.warnings.join("\n"), /not git-ignored/);
+    writeFileSync(join(cwd, ".gitignore"), ".parle/\n");
+    const ignored = resolveConfig(cwd, { HOME: home });
+    assert.doesNotMatch(ignored.warnings.join("\n"), /not git-ignored/);
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });

@@ -39,14 +39,19 @@ agent_token_id = 019f...
 An explicit profile is atomic. `PARLE_PROFILE` conflicts with direct
 `PARLE_ROOM_ID`, `PARLE_ROOM_AGENT_TOKEN`, `PARLE_AGENT_TOKEN_ID`,
 `PARLE_ROOM_HANDLE`, `PARLE_API_BASE`, or `PARLE_WAKE_BASE` configuration in
-process environment, project `.env`, or project `.parle/credentials`. Remove the
-direct values rather than mixing them with a profile. `PARLE_PROFILE` follows
-that same source precedence. If no profile or direct binding is set, `[default]`
-is selected only when that section exists. A catalog containing only named
-profiles does not implicitly select one.
+process environment or project `.env`. Remove the direct values rather than
+mixing them with a profile. `PARLE_PROFILE` follows that same source
+precedence. Profiles come from exactly one catalog per process:
+`~/.parle/profiles` by default, or the file named by `PARLE_PROFILES_PATH`
+(non-secret, same resolution as `PARLE_PROFILE`; relative paths resolve
+against the project cwd; the override replaces the default entirely, no
+layering). If no profile or direct binding is set, `[default]` is selected
+only when that section exists. A catalog containing only named profiles does
+not implicitly select one. A catalog inside a git work tree that is not
+git-ignored draws a warning.
 
 Direct configuration remains supported with precedence of process environment,
-project `.env`, then project `.parle/credentials`:
+then project `.env`:
 
 ```env
 PARLE_ROOM_ID=...
@@ -54,10 +59,11 @@ PARLE_ROOM_AGENT_TOKEN=...
 ```
 
 For a returning account, use `parle_login` instead of raw `parle_request` calls.
-It sends the email code, persists the human session cookie in the gitignored
-project `.parle/credentials` for later `mint-from-session` calls, mints a
-room-bound agent token, and atomically writes the selected profile to
-`~/.parle/profiles` with `0600` permissions. Because complete and mint operations
+It sends the email code, persists the human session cookie to a `session` file
+beside the resolved profile catalog (`~/.parle/session` by default; one
+`PARLE_PROFILES_PATH` override relocates the whole secrets home) for later
+`mint-from-session` calls, mints a room-bound agent token, and atomically
+writes the selected profile to the resolved catalog with `0600` permissions. Because complete and mint operations
 handle plaintext credentials, `writeCredentials: false` is rejected. `profile`
 defaults to `default`. Labels are 1 to 64 characters, start with a letter or
 number, and contain only letters, numbers, dot, underscore, or hyphen. Replacing
@@ -68,8 +74,9 @@ regular-file target are owned by the current user.
 
 Room and agent selectors may be passed directly as `roomId` or `roomHandle` and
 `agentId` or `agentHandle`. When omitted, login uses the corresponding resolved
-`PARLE_*` values with process environment, project `.env`, then project
-`.parle/credentials` precedence.
+`PARLE_*` values with process environment then project `.env` precedence.
+`PARLE_SESSION_COOKIE` additionally falls back to the `session` file beside the
+resolved catalog.
 
 Optional configuration:
 
@@ -83,7 +90,7 @@ PARLE_WATCH_ENABLED=1
 
 Secrets are redacted in status output.
 
-`Parle-Version` is a strict wire header owned by the adapter version. Do not store `PARLE_VERSION` in `.env` or `.parle/credentials`; persisted values are ignored with a warning. For staging or rollback only, set `PARLE_VERSION` in the process environment for that launch.
+`Parle-Version` is a strict wire header owned by the adapter version. Do not store `PARLE_VERSION` in `.env`; persisted values are ignored with a warning. For staging or rollback only, set `PARLE_VERSION` in the process environment for that launch.
 
 ### Session aliases
 

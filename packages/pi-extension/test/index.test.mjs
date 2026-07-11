@@ -64,14 +64,16 @@ test("status reads room and token from project .env and redacts token", async ()
 test("status ignores persisted PARLE_VERSION and warns", async () => {
   const cwd = tempProject("PARLE_ROOM_ID=room-1\nPARLE_ROOM_AGENT_TOKEN=token-1\nPARLE_VERSION=from-dotenv\nPARLE_WATCH_ENABLED=0\n");
   mkdirSync(join(cwd, ".parle"));
-  writeFileSync(join(cwd, ".parle", "credentials"), "PARLE_VERSION=from-credentials\n");
+  // A legacy credentials file is inert: no reads, no warnings about it.
+  writeFileSync(join(cwd, ".parle", "credentials"), "PARLE_VERSION=from-credentials\nPARLE_ROOM_ID=legacy-room\n");
   globalThis.fetch = async () => { throw new Error("offline test"); };
   const harness = installHarness(cwd);
   const status = await harness.call("parle_status");
   assert.equal(status.details.version.value, "2026-07-07");
   assert.equal(status.details.version.source, "default");
+  assert.equal(status.details.roomId.value, "room-1");
   assert.match(status.details.warnings.join("\n"), /Ignoring PARLE_VERSION from project \.env/);
-  assert.match(status.details.warnings.join("\n"), /Ignoring stale PARLE_VERSION from project \.parle\/credentials/);
+  assert.doesNotMatch(status.details.warnings.join("\n"), /credentials/);
 });
 
 test("status resolves explicit and default profiles with shared atomic-mode semantics", async () => {
@@ -171,7 +173,7 @@ test("status publishes a display-safe runtime snapshot", async () => {
   assert.equal(snapshot.sessionAddress, "@p.a.raw-session");
   assert.equal(snapshot.roomId, "room-1");
   assert.equal(snapshot.roomHandle, "galexc-intercom");
-  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.9" });
+  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.10" });
   assert.equal(JSON.stringify(snapshot).includes("parle_ses_raw-session"), false);
 });
 
@@ -275,8 +277,6 @@ test("parle_login starts email login without requiring raw request plumbing", as
 
 test("parle_login complete captures Set-Cookie, mints token, saves credentials, and redacts secrets", async () => {
   const cwd = tempProject();
-  mkdirSync(join(cwd, ".parle"));
-  writeFileSync(join(cwd, ".parle", "credentials"), "UNKNOWN_KEEP=keep-me\nPARLE_VERSION=stale-pin\n");
   const seen = [];
   globalThis.fetch = async (url, init = {}) => {
     const u = String(url);
@@ -310,21 +310,19 @@ test("parle_login complete captures Set-Cookie, mints token, saves credentials, 
   assert.equal(result.details.status, "credentials_saved");
   assert.equal(JSON.stringify(result.details).includes("parle_ses_cookie-secret"), false);
   assert.equal(JSON.stringify(result.details).includes("parle_agt_plain-secret"), false);
-  const credentials = readFileSync(join(cwd, ".parle", "credentials"), "utf8");
-  assert.match(credentials, /^PARLE_SESSION_COOKIE=__Host-parle_session=parle_ses_cookie-secret$/m);
-  assert.equal(credentials.includes("PARLE_ROOM_AGENT_TOKEN="), false);
-  assert.equal(credentials.includes("PARLE_ROOM_ID="), false);
-  assert.equal(credentials.includes("PARLE_AGENT_TOKEN_ID="), false);
-  assert.equal(credentials.includes("PARLE_VERSION="), false);
-  assert.match(credentials, /^UNKNOWN_KEEP=keep-me$/m);
+  // No project .parle/credentials file exists anymore; the session cookie
+  // lives beside the resolved profile catalog.
+  assert.equal(existsSync(join(cwd, ".parle", "credentials")), false);
+  const cookieFile = readFileSync(join(process.env.HOME, ".parle", "session"), "utf8");
+  assert.equal(cookieFile, "__Host-parle_session=parle_ses_cookie-secret\n");
+  assert.equal(statSync(join(process.env.HOME, ".parle", "session")).mode & 0o777, 0o600);
   const profiles = readFileSync(join(process.env.HOME, ".parle", "profiles"), "utf8");
   assert.match(profiles, /^\[default\]$/m);
   assert.match(profiles, /^room_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e$/m);
   assert.match(profiles, /^agent_token = parle_agt_plain-secret$/m);
   assert.match(profiles, /^agent_token_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1f$/m);
   assert.equal(statSync(join(process.env.HOME, ".parle", "profiles")).mode & 0o777, 0o600);
-  assert.equal(statSync(join(cwd, ".parle", "credentials")).mode & 0o777, 0o600);
-  assert.match(readFileSync(join(cwd, ".gitignore"), "utf8"), /^\.parle\/credentials$/m);
+  assert.equal(existsSync(join(cwd, ".gitignore")), false);
 
   const status = await harness.call("parle_status");
   assert.equal(status.details.sessionCookie.value, "<redacted>");
@@ -434,9 +432,8 @@ test("parle_login preserves session cookie when room or agent selection is ambig
   assert.equal(result.details.wroteSessionCookie, true);
   assert.equal(result.details.rooms.length, 2);
   assert.equal(result.details.agents.length, 2);
-  const credentials = readFileSync(join(cwd, ".parle", "credentials"), "utf8");
-  assert.match(credentials, /^PARLE_SESSION_COOKIE=__Host-parle_session=parle_ses_saved$/m);
-  assert.equal(credentials.includes("PARLE_ROOM_AGENT_TOKEN="), false);
+  assert.equal(existsSync(join(cwd, ".parle", "credentials")), false);
+  assert.equal(readFileSync(join(process.env.HOME, ".parle", "session"), "utf8"), "__Host-parle_session=parle_ses_saved\n");
 });
 
 test("parle_login complete refuses to consume a code when credentials will not be saved", async () => {
@@ -453,33 +450,30 @@ test("parle_login complete refuses to consume a code when credentials will not b
     /consume a one-time code/,
   );
   assert.equal(called, false);
-  assert.equal(existsSync(join(cwd, ".parle", "credentials")), false);
+  assert.equal(existsSync(join(process.env.HOME, ".parle", "session")), false);
 });
 
-test("parle_login preflight refuses a git-tracked credential sink before consuming code", async () => {
-  const cwd = tempProject();
-  writeFileSync(join(cwd, ".gitignore"), "");
-  await import("node:child_process").then(({ execFileSync }) => {
-    execFileSync("git", ["init"], { cwd, stdio: "ignore" });
-    execFileSync("git", ["config", "user.email", "test@example.test"], { cwd, stdio: "ignore" });
-    execFileSync("git", ["config", "user.name", "Test"], { cwd, stdio: "ignore" });
-  });
-  writeFileSync(join(cwd, ".parle-tracked-placeholder"), "x\n");
-  mkdirSync(join(cwd, ".parle"), { recursive: true });
-  writeFileSync(join(cwd, ".parle", "credentials"), "PARLE_VERSION=2026-07-07\n");
-  await import("node:child_process").then(({ execFileSync }) => execFileSync("git", ["add", ".parle/credentials"], { cwd, stdio: "ignore" }));
-  let called = false;
-  globalThis.fetch = async () => {
-    called = true;
-    return new Response("{}", { status: 201 });
+test("parle_login routes persistence through PARLE_PROFILES_PATH", async () => {
+  const cwd = tempProject("PARLE_PROFILES_PATH=./secrets/parle-profiles\nPARLE_SESSION_COOKIE=__Host-parle_session=parle_ses_existing\n");
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.endsWith("/v/rooms")) return new Response(JSON.stringify({ rooms: [{ room_id: "019f2946-aef5-77ad-a41d-747ce0fd6a1e", room_handle: "one" }] }), { status: 200 });
+    if (u.endsWith("/v/agents")) return new Response(JSON.stringify({ agents: [{ agent_id: "agent-1", agent_handle: "a" }] }), { status: 200 });
+    if (u.endsWith("/v/agents/agent-1/tokens")) return new Response(JSON.stringify({ agent_token_id: "019f2946-aef5-77ad-a41d-747ce0fd6a1f", token: "parle_agt_override-secret" }), { status: 201 });
+    throw new Error("unexpected " + u);
   };
   const harness = installHarness(cwd);
 
-  await assert.rejects(
-    harness.call("parle_login", { action: "complete", email: "user@example.test", code: "123456" }),
-    /tracked by git/,
-  );
-  assert.equal(called, false);
+  const result = await harness.call("parle_login", { action: "mint-from-session", roomId: "019f2946-aef5-77ad-a41d-747ce0fd6a1e", agentId: "agent-1", profile: "team" });
+
+  assert.equal(result.details.status, "credentials_saved");
+  assert.equal(result.details.profilePath, join(cwd, "secrets", "parle-profiles"));
+  assert.equal(result.details.sessionCookiePath, join(cwd, "secrets", "session"));
+  const profiles = readFileSync(join(cwd, "secrets", "parle-profiles"), "utf8");
+  assert.match(profiles, /^\[team\]$/m);
+  assert.match(profiles, /^agent_token = parle_agt_override-secret$/m);
+  assert.equal(readFileSync(join(cwd, "secrets", "session"), "utf8"), "__Host-parle_session=parle_ses_existing\n");
+  assert.equal(existsSync(join(process.env.HOME, ".parle", "profiles")), false);
 });
 
 test("parle_login fails closed on conflicting or duplicate selection", async () => {
@@ -516,45 +510,6 @@ test("parle_login mint-from-session refuses to mint when credentials will not be
     /mint a plaintext token/,
   );
   assert.equal(called, false);
-});
-
-test("parle_login refuses symlink credential sinks before consuming code", async () => {
-  const cwd = tempProject();
-  mkdirSync(join(cwd, ".parle"), { recursive: true });
-  writeFileSync(join(cwd, "elsewhere"), "original\n");
-  symlinkSync(join(cwd, "elsewhere"), join(cwd, ".parle", "credentials"));
-  let called = false;
-  globalThis.fetch = async () => {
-    called = true;
-    return new Response("{}", { status: 201 });
-  };
-  const harness = installHarness(cwd);
-
-  await assert.rejects(
-    harness.call("parle_login", { action: "complete", email: "user@example.test", code: "123456" }),
-    /not a regular file/,
-  );
-  assert.equal(called, false);
-  assert.equal(readFileSync(join(cwd, "elsewhere"), "utf8"), "original\n");
-});
-
-test("parle_login refuses symlink gitignore before consuming code", async () => {
-  const cwd = tempProject();
-  writeFileSync(join(cwd, "elsewhere-gitignore"), "original\n");
-  symlinkSync(join(cwd, "elsewhere-gitignore"), join(cwd, ".gitignore"));
-  let called = false;
-  globalThis.fetch = async () => {
-    called = true;
-    return new Response("{}", { status: 201 });
-  };
-  const harness = installHarness(cwd);
-
-  await assert.rejects(
-    harness.call("parle_login", { action: "complete", email: "user@example.test", code: "123456" }),
-    /update \.gitignore/,
-  );
-  assert.equal(called, false);
-  assert.equal(readFileSync(join(cwd, "elsewhere-gitignore"), "utf8"), "original\n");
 });
 
 function installSendHarness(fetchImpl) {

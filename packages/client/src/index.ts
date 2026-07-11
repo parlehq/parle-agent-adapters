@@ -3,12 +3,12 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { RUNTIME_SCHEMA_VERSION, processStartedAtIso, pruneRuntimeFiles, removeRuntimeFile, writeRuntimeFile } from "./runtime-file.js";
 import { ERROR_ACTIONS, ERROR_REGISTRY, ERROR_SCOPES, type ErrorAction, type ErrorScope } from "./error-contract.js";
-import { loadProfile, profileCatalogHasProfile, profileCatalogPaths, type CredentialProfile } from "./profiles.js";
+import { catalogGitExposureWarning, loadProfile, profileCatalogHasProfile, resolveProfileCatalogPath, type CredentialProfile } from "./profiles.js";
 
 export * from "./format.js";
 export * from "./runtime-file.js";
 export { ERROR_ACTIONS, ERROR_REGISTRY, ERROR_SCOPES, type ErrorAction, type ErrorScope } from "./error-contract.js";
-export { PROFILE_CATALOG_PATH, ProfileConfigError, loadProfile, parseProfiles, profileCatalogExists, profileCatalogHasProfile, profileCatalogPath, profileCatalogPaths, type CredentialProfile } from "./profiles.js";
+export { PROFILE_CATALOG_PATH, ProfileConfigError, catalogGitExposureWarning, loadProfile, parseProfiles, profileCatalogExists, profileCatalogHasProfile, profileCatalogPath, resolveProfileCatalogPath, type CredentialProfile } from "./profiles.js";
 
 export const DEFAULT_API_BASE = "https://api.parle.sh";
 export const DEFAULT_WAKE_BASE = DEFAULT_API_BASE;
@@ -197,7 +197,7 @@ function firstConfigValue(name: string, sources: Array<{ name: string; values: R
   return { value: fallback, source: fallback === undefined ? "missing" : "default" };
 }
 
-function versionConfig(env: Record<string, string | undefined>, dotEnv: Record<string, string>, credentials: Record<string, string>, warnings: string[]): ConfigValue {
+function versionConfig(env: Record<string, string | undefined>, dotEnv: Record<string, string>, warnings: string[]): ConfigValue {
   if (env.PARLE_VERSION) {
     // An env value equal to the default is not an override; env-snapshotting
     // hosts (mise .env injection) make that the normal state, and a permanent
@@ -208,26 +208,29 @@ function versionConfig(env: Record<string, string | undefined>, dotEnv: Record<s
     return { value: env.PARLE_VERSION, source: "env" };
   }
   if (dotEnv.PARLE_VERSION) warnings.push(`Ignoring PARLE_VERSION from .env (${dotEnv.PARLE_VERSION}); the adapter default is ${DEFAULT_VERSION}. Use process env only for advanced version overrides.`);
-  if (credentials.PARLE_VERSION) warnings.push(`Ignoring stale PARLE_VERSION from .parle/credentials (${credentials.PARLE_VERSION}); the adapter default is ${DEFAULT_VERSION}. Use process env only for advanced version overrides.`);
   return { value: DEFAULT_VERSION, source: "default" };
 }
 
 export function resolveConfig(cwd = process.cwd(), env: Record<string, string | undefined> = process.env): ParleConfig {
   const dotEnv = readKeyValueFile(join(cwd, ".env"));
-  const credentials = readKeyValueFile(join(cwd, ".parle", "credentials"));
   const sources = [
     { name: "env", values: env },
     { name: ".env", values: dotEnv },
-    { name: ".parle/credentials", values: credentials },
   ];
   const warnings: string[] = [];
   const directBindingKeys = ["PARLE_ROOM_ID", "PARLE_ROOM_AGENT_TOKEN", "PARLE_AGENT_TOKEN_ID", "PARLE_ROOM_HANDLE", "PARLE_API_BASE", "PARLE_WAKE_BASE"];
   const directValues = directBindingKeys.map((key) => firstConfigValue(key, sources)).filter((value) => value.value);
   const explicitProfile = firstConfigValue("PARLE_PROFILE", sources);
-  const catalogPaths = profileCatalogPaths(cwd, env);
+  // PARLE_PROFILES_PATH is a non-secret setting like PARLE_PROFILE: it names
+  // the catalog FILE and replaces the default path entirely (one catalog per
+  // process, no layering). It is not a direct-binding variable.
+  const catalogOverride = firstConfigValue("PARLE_PROFILES_PATH", sources);
+  const catalogPath = resolveProfileCatalogPath(catalogOverride.value, cwd, env);
+  const gitExposure = catalogGitExposureWarning(catalogPath);
+  if (gitExposure) warnings.push(gitExposure);
   const profileSelector = explicitProfile.value
     ? explicitProfile
-    : directValues.length === 0 && profileCatalogHasProfile("default", catalogPaths)
+    : directValues.length === 0 && profileCatalogHasProfile("default", catalogPath)
       ? { value: "default", source: "profile_catalog" }
       : explicitProfile;
   let profile: CredentialProfile | undefined;
@@ -236,14 +239,14 @@ export function resolveConfig(cwd = process.cwd(), env: Record<string, string | 
       const conflicts = directValues.map((value) => `${value.source}`);
       throw new Error(`PARLE_PROFILE from ${profileSelector.source} conflicts with direct configuration (${conflicts.join(", ")}). Remove the direct variables or unset PARLE_PROFILE.`);
     }
-    profile = loadProfile(profileSelector.value, catalogPaths);
+    profile = loadProfile(profileSelector.value, catalogPath);
   }
   const profileValue = (name: string, value: string | undefined): ConfigValue | undefined => value === undefined ? undefined : { value, source: `profile:${profile!.name}` };
   const cfg: ParleConfig = {
     enabledInput: firstConfigValue("PARLE_ENABLED", sources, "1"),
     apiBase: profile ? profileValue("PARLE_API_BASE", profile.apiBase ?? DEFAULT_API_BASE)! : firstConfigValue("PARLE_API_BASE", sources, DEFAULT_API_BASE),
     wakeBase: profile ? profileValue("PARLE_WAKE_BASE", profile.wakeBase ?? DEFAULT_WAKE_BASE)! : firstConfigValue("PARLE_WAKE_BASE", sources, DEFAULT_WAKE_BASE),
-    version: versionConfig(env, dotEnv, credentials, warnings),
+    version: versionConfig(env, dotEnv, warnings),
     roomId: profile ? profileValue("PARLE_ROOM_ID", profile.roomId) : firstConfigValue("PARLE_ROOM_ID", sources),
     roomHandle: profile ? undefined : firstConfigValue("PARLE_ROOM_HANDLE", sources),
     agentToken: profile ? profileValue("PARLE_ROOM_AGENT_TOKEN", profile.agentToken) : firstConfigValue("PARLE_ROOM_AGENT_TOKEN", sources),
@@ -601,7 +604,7 @@ export class ParleAgentClient {
     // @parle-interpretation parlehq/parle#434
     // Connection-posture wording pending the core session lifecycle contract.
     const note = missing.length
-      ? "Set PARLE_PROFILE (a ~/.parle/profiles section) or direct configuration in env or .env (checked in that order; disk token rotations can be reloaded once during bootstrap recovery)."
+      ? "Set PARLE_PROFILE (a section of the profile catalog, ~/.parle/profiles by default, PARLE_PROFILES_PATH to relocate) or direct configuration in env or .env (checked in that order; disk token rotations can be reloaded once during bootstrap recovery)."
       : this.runtime.bootstrapped
         ? "Parle configuration is present and this process holds a session."
         : "Parle configuration is present. Not yet connected in this process; a connect, read, or send call establishes the session.";
@@ -615,17 +618,14 @@ export class ParleAgentClient {
   staleTokenHint(): string | undefined {
     const current = this.cfg.agentToken?.value;
     if (!current) return undefined;
-    for (const rel of [".env", ".parle/credentials"]) {
-      try {
-        const onDisk = readKeyValueFile(join(this.cwd, rel))["PARLE_ROOM_AGENT_TOKEN"];
-        if (onDisk === undefined || onDisk === "") continue;
-        if (onDisk === current) return undefined;
-        return `PARLE_ROOM_AGENT_TOKEN in ${rel} differs from the value this process loaded at startup (source: ${this.cfg.agentToken?.source}). The token was likely rotated. Parle will try to reload it during the next bootstrap; restart the host process if the terminal error remains.`;
-      } catch {
-        return undefined;
-      }
+    try {
+      const onDisk = readKeyValueFile(join(this.cwd, ".env"))["PARLE_ROOM_AGENT_TOKEN"];
+      if (onDisk === undefined || onDisk === "") return undefined;
+      if (onDisk === current) return undefined;
+      return `PARLE_ROOM_AGENT_TOKEN in .env differs from the value this process loaded at startup (source: ${this.cfg.agentToken?.source}). The token was likely rotated. Parle will try to reload it during the next bootstrap; restart the host process if the terminal error remains.`;
+    } catch {
+      return undefined;
     }
-    return undefined;
   }
 
   private refreshConfigIfAgentTokenChanged(): boolean {

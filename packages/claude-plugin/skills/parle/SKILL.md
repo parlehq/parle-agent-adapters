@@ -15,13 +15,13 @@ Expected environment values:
 - `PARLE_ROOM_ID`
 - `PARLE_ROOM_AGENT_TOKEN`
 
-`Parle-Version` is owned by the adapter. Do not store `PARLE_VERSION` in `.env` or `.parle/credentials`; persisted values are ignored with a warning. For staging or rollback only, set `PARLE_VERSION` in the process environment for that launch.
+`Parle-Version` is owned by the adapter. Do not store `PARLE_VERSION` in `.env`; persisted values are ignored with a warning. For staging or rollback only, set `PARLE_VERSION` in the process environment for that launch.
 
 Do not set `PARLE_SESSION_ALIAS` for ordinary sessions. Use it only for an explicit singleton role where this process should take over a named route.
 
 Source precedence and snapshot semantics:
 
-- Values resolve from three sources, first non-empty wins: process environment, then `<cwd>/.env`, then `<cwd>/.parle/credentials`. `PARLE_PROFILE` selects an atomic binding from `~/.parle/profiles`, falling back to `<cwd>/.parle/profiles`; it cannot be mixed with direct room-binding values, and `[default]` is selected only when no explicit binding exists. `PARLE_VERSION` is the exception: only process env overrides the adapter default.
+- Values resolve from two sources, first non-empty wins: process environment, then `<cwd>/.env`. There is no project `.parle/credentials` file; a leftover one is inert. `PARLE_PROFILE` selects an atomic binding from the profile catalog (`~/.parle/profiles` by default; `PARLE_PROFILES_PATH` names a different catalog file and replaces the default entirely -- exactly one catalog per process, no layering, relative paths resolve against the project cwd). A profile cannot be mixed with direct room-binding values, and `[default]` is selected only when no explicit binding exists. `PARLE_VERSION` is the exception: only process env overrides the adapter default. A catalog inside a git work tree that is not git-ignored draws a warning.
 - Configuration loads ONCE when the MCP server process starts. Nothing re-reads it mid-session. The plugin never writes any of these files; `parle_setup` is diagnostic only.
 - Harness env injectors (for example mise `[env] _.file = ".env"`) snapshot `.env` into the process environment at shell init, which becomes the highest-precedence source.
 

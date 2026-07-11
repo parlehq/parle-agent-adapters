@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.5.17 (2026-07-10)
+
+`.parle/credentials` is gone; `PARLE_PROFILES_PATH` relocates the profile catalog (bundled artifact refresh; gate constraints from galexc-intercom seq 853/858).
+
+- The project `.parle/credentials` file is removed entirely: no reads in the client or Pi resolvers, no writes anywhere, and the gitignore machinery is deleted. A leftover file is inert. Config precedence is now process env, then `<cwd>/.env`; secrets live in the profile catalog and projects express only the non-secret `PARLE_PROFILE` selector (and optionally `PARLE_PROFILES_PATH`) in `.env`.
+- `PARLE_PROFILES_PATH` names the catalog FILE and replaces the default `~/.parle/profiles` entirely -- exactly one catalog per process, no user+project layering (the implicit project fallback from 92016c7 is reverted). It is a non-secret setting resolved like `PARLE_PROFILE` (process env, then project `.env`); relative paths resolve against the project cwd; all catalog safety discipline (user-owned, symlink resolution, 0600 remediation, strict parse, atomic writes) applies unchanged at the override path; it composes with profile mode and does not trigger the direct-binding conflict rule.
+- Warn-only guard for the original hazard: a resolved catalog inside a git work tree that is not git-ignored draws a redaction-safe warning suggesting an ignore entry (git check-ignore is authoritative; no gitignore-writing machinery returns).
+- The `parle_login` session cookie moves to `dirname(resolved catalog)/session` (0600, atomic, same ownership/symlink discipline as the catalog writer), so one `PARLE_PROFILES_PATH` override relocates the whole secrets home; cookie resolution is process env, then `.env`, then that file. `parle_login` writes profiles to the resolved catalog; the `updateGitignore` parameter is removed.
+- The statusline's configured-but-off hint now keys on Parle key names in the project `.env` (names only, values never read) instead of the deleted credentials file. Watcher parity: the bundled resolver honors the override on every arm, and the parent deletes `PARLE_PROFILE`/`PARLE_PROFILES_PATH` from the worker child env after resolving so the child cannot re-resolve against a different catalog.
+
+
 ## 0.5.16 (2026-07-10)
 
 Claude MCP and standalone watcher profile parity.

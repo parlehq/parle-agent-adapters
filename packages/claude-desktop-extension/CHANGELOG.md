@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.9 (2026-07-10)
+
+Bundled MCP refresh: `.parle/credentials` removed, `PARLE_PROFILES_PATH` catalog override.
+
+- The shared client no longer reads a project `.parle/credentials` file; profiles resolve from exactly one catalog (`~/.parle/profiles` or the `PARLE_PROFILES_PATH` override), with a warn-only guard when the catalog sits unignored inside a git work tree. Desktop setup remains env-only.
+
 ## 0.5.8 (2026-07-10)
 
 Bundled MCP refresh for shared credential-profile resolution. Desktop's documented env-only setup remains unchanged.

@@ -2,10 +2,10 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { loadProfile, parseProfiles, profileCatalogHasProfile, profileCatalogPath, type CredentialProfile } from "./profiles.js";
+import { catalogGitExposureWarning, loadProfile, parseProfiles, profileCatalogHasProfile, resolveProfileCatalogPath, type CredentialProfile } from "./profiles.js";
 import { Type } from "typebox";
 const EXTENSION_ID = "25-parle";
-const PI_EXTENSION_VERSION = "0.1.9";
+const PI_EXTENSION_VERSION = "0.1.10";
 const RUNTIME_SCHEMA_VERSION = 1;
 const DEFAULT_API_BASE = "https://api.parle.sh";
 const DEFAULT_VERSION = "2026-07-07";
@@ -27,7 +27,7 @@ const FOOTER_FAILURE_THRESHOLD = 3;
 const FOOTER_FAILURE_AGE_MS = 60_000;
 const INJECTED_KEY_LIMIT = 4096;
 
-type SourceKind = "env" | "project_env" | "project_parle" | "profile_catalog" | `profile:${string}` | "default";
+type SourceKind = "env" | "project_env" | "session_file" | "profile_catalog" | `profile:${string}` | "default";
 
 type ConfigValue = {
   value: string;
@@ -54,6 +54,7 @@ type ParleConfig = {
   watchEnabled: ConfigValue;
   wakeBase: ConfigValue;
   profile?: ConfigValue;
+  profilesPath: ConfigValue;
   warnings: string[];
 };
 
@@ -115,7 +116,6 @@ type ParleLoginParams = {
   agentId?: string;
   agentHandle?: string;
   writeCredentials?: boolean;
-  updateGitignore?: boolean;
   profile?: string;
   force?: boolean;
   reason?: string;
@@ -199,11 +199,9 @@ function makeValue(value: string | undefined, source: SourceKind, key: string, s
 
 function resolveConfig(cwd: string): ParleConfig {
   const projectEnv = readKeyValueFile(join(cwd, ".env"));
-  const projectParle = { ...readKeyValueFile(join(cwd, ".parle", "credentials")) };
   const sourceCandidates = (key: string, secret = false): Array<ConfigValue | undefined> => [
     makeValue(process.env[key], "env", key, secret),
     makeValue(projectEnv[key], "project_env", key, secret, secret ? "secret comes from project .env" : undefined),
-    makeValue(projectParle[key], "project_parle", key, secret, secret ? "secret comes from project .parle/credentials" : undefined),
   ];
   const enabledInput = firstConfigValue(sourceCandidates("PARLE_ENABLED")) || { value: "<unset>", source: "default", key: "PARLE_ENABLED" };
   const enabled = enabledInput.value === "<unset>" ? true : parseBoolEnabled(enabledInput.value);
@@ -225,7 +223,6 @@ function resolveConfig(cwd: string): ParleConfig {
       return { value: process.env.PARLE_VERSION, source: "env", key: "PARLE_VERSION" };
     }
     if (projectEnv.PARLE_VERSION) warnings.push(`Ignoring PARLE_VERSION from project .env (${projectEnv.PARLE_VERSION}); the adapter default is ${DEFAULT_VERSION}. Use process env only for advanced version overrides.`);
-    if (projectParle.PARLE_VERSION) warnings.push(`Ignoring stale PARLE_VERSION from project .parle/credentials (${projectParle.PARLE_VERSION}); remove it. The adapter default is ${DEFAULT_VERSION}.`);
     return { value: DEFAULT_VERSION, source: "default", key: "PARLE_VERSION" };
   }
 
@@ -235,7 +232,13 @@ function resolveConfig(cwd: string): ParleConfig {
     return value ? [value] : [];
   });
   const explicitProfile = firstConfigValue(sourceCandidates("PARLE_PROFILE"));
-  const catalogPath = profileCatalogPath(process.env);
+  // PARLE_PROFILES_PATH is a non-secret setting resolved like PARLE_PROFILE:
+  // it names the catalog FILE and replaces the default path entirely (one
+  // catalog per process, no layering). Relative paths resolve against cwd.
+  const catalogOverride = firstConfigValue(sourceCandidates("PARLE_PROFILES_PATH"));
+  const catalogPath = resolveProfileCatalogPath(catalogOverride?.value, cwd, process.env);
+  const gitExposure = catalogGitExposureWarning(catalogPath);
+  if (gitExposure) warnings.push(gitExposure);
   const profileSelector = explicitProfile || (directValues.length === 0 && profileCatalogHasProfile("default", catalogPath)
     ? { value: "default", source: "profile_catalog" as const, key: "PARLE_PROFILE" }
     : undefined);
@@ -266,11 +269,14 @@ function resolveConfig(cwd: string): ParleConfig {
     agentId: pick("PARLE_AGENT_ID", undefined),
     principalHandle: pick("PARLE_PRINCIPAL_HANDLE", undefined),
     agentHandle: pick("PARLE_AGENT_HANDLE", undefined),
-    sessionCookie: pick("PARLE_SESSION_COOKIE", undefined, true),
+    sessionCookie: firstConfigValue(sourceCandidates("PARLE_SESSION_COOKIE", true))
+      || makeValue(readSessionCookieFile(sessionCookieFilePath(catalogPath)), "session_file", "PARLE_SESSION_COOKIE", true)
+      || { value: "", source: "default", key: "PARLE_SESSION_COOKIE", secret: true },
     sessionAlias: pick("PARLE_SESSION_ALIAS", undefined),
     watchEnabled: pick("PARLE_WATCH_ENABLED", "1"),
     wakeBase: profile ? fromProfile("PARLE_WAKE_BASE", profile.wakeBase, DEFAULT_API_BASE) : pick("PARLE_WAKE_BASE", undefined),
     profile: profileSelector,
+    profilesPath: { value: catalogPath, source: catalogOverride ? catalogOverride.source : "default", key: "PARLE_PROFILES_PATH" },
     warnings,
   };
   for (const value of [cfg.apiBase, cfg.wakeBase, cfg.version, cfg.roomId, cfg.roomHandle, cfg.agentToken, cfg.agentTokenId, cfg.agentId, cfg.principalHandle, cfg.agentHandle, cfg.sessionCookie, cfg.sessionAlias, cfg.watchEnabled, cfg.profile]) {
@@ -278,7 +284,7 @@ function resolveConfig(cwd: string): ParleConfig {
   }
   // Process env is a startup snapshot; project .env is regenerated on rotation.
   // When they disagree on the token, the snapshot is almost certainly stale.
-  const diskToken = projectEnv.PARLE_ROOM_AGENT_TOKEN || projectParle.PARLE_ROOM_AGENT_TOKEN;
+  const diskToken = projectEnv.PARLE_ROOM_AGENT_TOKEN;
   if (!profile && cfg.agentToken?.source === "env" && diskToken && diskToken !== cfg.agentToken?.value) {
     cfg.warnings.push("PARLE_ROOM_AGENT_TOKEN on disk differs from the process environment snapshot. The token was likely rotated. Restart the harness process to reload it.");
   }
@@ -329,8 +335,8 @@ function assertEnabled(cfg: ParleConfig) {
 
 function assertRuntimeConfig(cfg: ParleConfig) {
   assertEnabled(cfg);
-  if (!cfg.roomId?.value) throw new Error("Parle setup needed: PARLE_ROOM_ID is missing. Set it in the environment, .env, or .parle/credentials.");
-  if (!cfg.agentToken?.value) throw new Error("Parle setup needed: PARLE_ROOM_AGENT_TOKEN is missing. Set it in the environment, .env, or .parle/credentials.");
+  if (!cfg.roomId?.value) throw new Error("Parle setup needed: PARLE_ROOM_ID is missing. Set PARLE_PROFILE (profile catalog, PARLE_PROFILES_PATH to relocate) or set it in the environment or .env.");
+  if (!cfg.agentToken?.value) throw new Error("Parle setup needed: PARLE_ROOM_AGENT_TOKEN is missing. Set PARLE_PROFILE (profile catalog, PARLE_PROFILES_PATH to relocate) or set it in the environment or .env.");
   assertSafeBase(cfg.apiBase.value);
   if (cfg.wakeBase.value) assertSafeBase(cfg.wakeBase.value);
 }
@@ -401,84 +407,43 @@ function mutationScope(method: string, pathOrUrl: string): string {
   }
 }
 
-function credentialsPath(cwd: string): string {
-  return join(cwd, ".parle", "credentials");
+// The parle_login session cookie lives next to the resolved profile catalog
+// (dirname(catalog)/session), so one PARLE_PROFILES_PATH override relocates
+// the whole secrets home. Same safety discipline as the catalog writer:
+// user-owned, symlink-resolved, 0600, atomic replace.
+function sessionCookieFilePath(catalogPath: string): string {
+  return join(dirname(catalogPath), "session");
 }
 
-function credentialLine(key: string, value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  return `${key}=${value}`;
-}
-
-function credentialKeys(): string[] {
-  return [
-    "PARLE_API_BASE",
-    "PARLE_WAKE_BASE",
-    "PARLE_PRINCIPAL_HANDLE",
-    "PARLE_AGENT_HANDLE",
-    "PARLE_ROOM_HANDLE",
-    "PARLE_ROOM_ID",
-    "PARLE_AGENT_ID",
-    "PARLE_AGENT_TOKEN_ID",
-    "PARLE_SESSION_COOKIE",
-    "PARLE_ROOM_AGENT_TOKEN",
-    "PARLE_WATCH_ENABLED",
-    "PARLE_SESSION_ALIAS",
-  ];
-}
-
-function ensureParleDirectory(cwd: string) {
-  const dir = join(cwd, ".parle");
-  if (existsSync(dir)) {
-    const stat = lstatSync(dir);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("Refusing to write .parle/credentials because .parle is not a regular directory.");
-  } else {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-  }
-  chmodSync(dir, 0o700);
-}
-
-function assertSafeCredentialPath(cwd: string) {
-  const path = credentialsPath(cwd);
-  if (!existsSync(path)) return;
-  const stat = lstatSync(path);
-  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Refusing to write .parle/credentials because it is not a regular file.");
-}
-
-function credentialsTrackedByGit(cwd: string): boolean {
+function readSessionCookieFile(path: string): string | undefined {
   try {
-    const output = execFileSync("git", ["-C", cwd, "ls-files", ".parle/credentials"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    return output.split(/\r?\n/).includes(".parle/credentials");
+    if (!existsSync(path)) return undefined;
+    const link = lstatSync(path);
+    const stat = link.isSymbolicLink() ? statSync(path) : link;
+    if (!stat.isFile()) return undefined;
+    if (process.platform !== "win32" && stat.uid !== process.getuid?.()) return undefined;
+    const value = readFileSync(path, "utf8").trim();
+    return value || undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
-function ensureCredentialsIgnored(cwd: string): boolean {
-  const path = join(cwd, ".gitignore");
-  const entry = ".parle/credentials";
-  if (existsSync(path)) {
-    const stat = lstatSync(path);
-    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Refusing to update .gitignore because it is not a regular file.");
+function writeSessionCookieFile(catalogPath: string, cookie: string): string {
+  ensureProfileDirectory(catalogPath);
+  const path = sessionCookieFilePath(catalogPath);
+  const writePath = safeProfileWritePath(path);
+  const tempPath = join(dirname(writePath), `.session.${process.pid}.${Date.now()}.tmp`);
+  try {
+    writeFileSync(tempPath, `${cookie}\n`, { mode: 0o600 });
+    chmodSync(tempPath, 0o600);
+    renameSync(tempPath, writePath);
+    chmodSync(writePath, 0o600);
+  } catch (error) {
+    try { if (existsSync(tempPath)) unlinkSync(tempPath); } catch {}
+    throw error;
   }
-  const text = existsSync(path) ? readFileSync(path, "utf8") : "";
-  if (text.split(/\r?\n/).includes(entry)) return false;
-  const prefix = text && !text.endsWith("\n") ? `${text}\n` : text;
-  writeFileSync(path, `${prefix}${entry}\n`);
-  return true;
-}
-
-function preflightCredentialSink(cwd: string, updateGitignore: boolean) {
-  ensureParleDirectory(cwd);
-  if (credentialsTrackedByGit(cwd)) {
-    throw new Error("Refusing to write .parle/credentials because it is tracked by git. Remove it from the index before running parle_login complete.");
-  }
-  assertSafeCredentialPath(cwd);
-  const probe = join(cwd, ".parle", ".credentials-write-test");
-  writeFileSync(probe, "ok\n", { mode: 0o600 });
-  chmodSync(probe, 0o600);
-  unlinkSync(probe);
-  if (updateGitignore) ensureCredentialsIgnored(cwd);
+  return path;
 }
 
 function runtimeDirPath(cwd: string): string {
@@ -560,39 +525,6 @@ function publishRuntimeState(ctx: any, cfg = resolveConfig(ctx?.cwd || process.c
   }
 }
 
-function writeCredentialFile(cwd: string, values: Record<string, string | undefined>) {
-  preflightCredentialSink(cwd, false);
-  const path = credentialsPath(cwd);
-  const existing = readKeyValueFile(path);
-  const merged: Record<string, string> = { ...existing };
-  delete merged.PARLE_VERSION;
-  for (const [key, value] of Object.entries(values)) {
-    if (value === undefined || value === "") continue;
-    merged[key] = value;
-  }
-  const ordered = credentialKeys();
-  const lines: string[] = [];
-  for (const key of ordered) {
-    const line = credentialLine(key, merged[key]);
-    if (line) lines.push(line);
-  }
-  for (const key of Object.keys(merged).sort()) {
-    if (ordered.includes(key)) continue;
-    const line = credentialLine(key, merged[key]);
-    if (line) lines.push(line);
-  }
-  const tempPath = join(cwd, ".parle", `.credentials.${process.pid}.${Date.now()}.tmp`);
-  try {
-    writeFileSync(tempPath, `${lines.join("\n")}\n`, { mode: 0o600 });
-    chmodSync(tempPath, 0o600);
-    renameSync(tempPath, path);
-    chmodSync(path, 0o600);
-  } catch (error) {
-    try { if (existsSync(tempPath)) unlinkSync(tempPath); } catch {}
-    throw error;
-  }
-}
-
 const PROFILE_LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 function assertProfileLabel(label: string): void {
@@ -650,9 +582,8 @@ function renderedProfileSection(profile: CredentialProfile): string {
   ].filter(Boolean).join("\n") + "\n";
 }
 
-function preflightProfileSink(label: string, force: boolean): { path: string; writePath: string; exists: boolean; priorAgentTokenId?: string } {
+function preflightProfileSink(label: string, force: boolean, path: string): { path: string; writePath: string; exists: boolean; priorAgentTokenId?: string } {
   assertProfileLabel(label);
-  const path = profileCatalogPath(process.env);
   const writeDir = ensureProfileDirectory(path);
   const writePath = safeProfileWritePath(join(writeDir, basename(path)));
   const text = existsSync(writePath) ? readFileSync(writePath, "utf8") : "";
@@ -666,8 +597,8 @@ function preflightProfileSink(label: string, force: boolean): { path: string; wr
   return { path, writePath, exists, priorAgentTokenId: profiles.get(label)?.agentTokenId };
 }
 
-function writeProfile(profile: CredentialProfile, force: boolean): { path: string; replaced: boolean; priorAgentTokenId?: string } {
-  const preflight = preflightProfileSink(profile.name, force);
+function writeProfile(profile: CredentialProfile, force: boolean, catalogPath: string): { path: string; replaced: boolean; priorAgentTokenId?: string } {
+  const preflight = preflightProfileSink(profile.name, force, catalogPath);
   const original = existsSync(preflight.writePath) ? readFileSync(preflight.writePath, "utf8") : "";
   const range = profileSectionRange(original, profile.name);
   const section = renderedProfileSection(profile);
@@ -762,9 +693,8 @@ async function parleLogin(ctx: any, cfg: ParleConfig, params: ParleLoginParams, 
   assertSafeBase(cfg.apiBase.value);
   const action = params.action || (params.code ? "complete" : "start");
   const writeCredentials = params.writeCredentials !== false;
-  const updateGitignore = params.updateGitignore !== false;
   const profileName = params.profile || "default";
-  const cwd = ctx.cwd || process.cwd();
+  const catalogPath = cfg.profilesPath.value;
 
   if (action === "start") {
     if (!params.email) throw new Error("parle_login start requires email.");
@@ -788,8 +718,7 @@ async function parleLogin(ctx: any, cfg: ParleConfig, params: ParleLoginParams, 
     if (!params.email) throw new Error("parle_login complete requires email.");
     if (!params.code) throw new Error("parle_login complete requires code.");
     if (!writeCredentials) throw new Error("parle_login complete refuses writeCredentials=false because it would consume a one-time code without durable credential recovery.");
-    preflightCredentialSink(cwd, updateGitignore);
-    preflightProfileSink(profileName, params.force === true);
+    preflightProfileSink(profileName, params.force === true, catalogPath);
     const response = await fetch(new URL("/v/auth/email/complete", cfg.apiBase.value), {
       method: "POST",
       headers: { Accept: "application/json", "Content-Type": "application/json", "Parle-Version": cfg.version.value || DEFAULT_VERSION },
@@ -800,15 +729,11 @@ async function parleLogin(ctx: any, cfg: ParleConfig, params: ParleLoginParams, 
     if (!response.ok) throw new Error(`Parle email login complete failed ${response.status}: ${truncateText(text, 4096).text}`);
     sessionCookie = extractSessionCookie(response.headers);
     if (!sessionCookie) throw new Error("Parle email login completed but no __Host-parle_session Set-Cookie header was present. Credential persistence cannot continue safely.");
-    if (writeCredentials) {
-      writeCredentialFile(cwd, { PARLE_SESSION_COOKIE: sessionCookie });
-      if (updateGitignore) ensureCredentialsIgnored(cwd);
-    }
+    if (writeCredentials) writeSessionCookieFile(catalogPath, sessionCookie);
   } else if (action === "mint-from-session") {
     if (!writeCredentials) throw new Error("parle_login mint-from-session refuses writeCredentials=false because it would mint a plaintext token without durable credential recovery.");
-    preflightCredentialSink(cwd, updateGitignore);
-    preflightProfileSink(profileName, params.force === true);
-    if (!sessionCookie) throw new Error("parle_login mint-from-session requires PARLE_SESSION_COOKIE in env, .env, or .parle/credentials.");
+    preflightProfileSink(profileName, params.force === true, catalogPath);
+    if (!sessionCookie) throw new Error(`parle_login mint-from-session requires PARLE_SESSION_COOKIE in env or .env, or a session file at ${sessionCookieFilePath(catalogPath)} (written by parle_login complete).`);
   } else {
     throw new Error(`Unknown parle_login action: ${action}`);
   }
@@ -817,11 +742,10 @@ async function parleLogin(ctx: any, cfg: ParleConfig, params: ParleLoginParams, 
   const agentsBody = await humanJson(cfg, "/v/agents", sessionCookie, { signal });
   const rooms = Array.isArray(roomsBody?.rooms) ? roomsBody.rooms : Array.isArray(roomsBody) ? roomsBody : [];
   const agents = Array.isArray(agentsBody?.agents) ? agentsBody.agents : Array.isArray(agentsBody) ? agentsBody : [];
-  const existingCredentials = readKeyValueFile(credentialsPath(cwd));
   const roomId = params.roomId || (params.roomHandle ? undefined : cfg.roomId?.value);
   const roomHandle = params.roomHandle || (params.roomId ? undefined : cfg.roomHandle?.value);
-  const agentId = params.agentId || (params.agentHandle ? undefined : cfg.agentId?.value || existingCredentials.PARLE_AGENT_ID);
-  const agentHandle = params.agentHandle || (params.agentId ? undefined : cfg.agentHandle?.value || existingCredentials.PARLE_AGENT_HANDLE);
+  const agentId = params.agentId || (params.agentHandle ? undefined : cfg.agentId?.value);
+  const agentHandle = params.agentHandle || (params.agentId ? undefined : cfg.agentHandle?.value);
   const room = chooseInventoryItem(rooms, "room_id", "room_handle", "room", roomId, roomHandle);
   const agent = chooseInventoryItem(agents, "agent_id", "agent_handle", "agent", agentId, agentHandle);
   if (!room || !agent) {
@@ -843,7 +767,7 @@ async function parleLogin(ctx: any, cfg: ParleConfig, params: ParleLoginParams, 
   if (!token) throw new Error("Parle token mint succeeded without returning a plaintext token; local credentials were not updated with an agent token.");
   let profileWrite: { path: string; replaced: boolean; priorAgentTokenId?: string } | undefined;
   if (writeCredentials) {
-    writeCredentialFile(cwd, { PARLE_SESSION_COOKIE: sessionCookie });
+    writeSessionCookieFile(catalogPath, sessionCookie);
     profileWrite = writeProfile({
       name: profileName,
       roomId: room.room_id,
@@ -851,8 +775,7 @@ async function parleLogin(ctx: any, cfg: ParleConfig, params: ParleLoginParams, 
       agentTokenId: tokenBody.agent_token_id,
       apiBase: cfg.apiBase.value || DEFAULT_API_BASE,
       wakeBase: cfg.wakeBase.value || undefined,
-    }, params.force === true);
-    if (updateGitignore) ensureCredentialsIgnored(cwd);
+    }, params.force === true, catalogPath);
   }
   return {
     status: "credentials_saved",
@@ -861,7 +784,7 @@ async function parleLogin(ctx: any, cfg: ParleConfig, params: ParleLoginParams, 
     profileReplaced: profileWrite?.replaced,
     prior_agent_token_id: profileWrite?.replaced ? profileWrite.priorAgentTokenId : undefined,
     profilePath: profileWrite?.path,
-    gitignoreUpdated: updateGitignore,
+    sessionCookiePath: writeCredentials ? sessionCookieFilePath(catalogPath) : undefined,
     room: { room_id: room.room_id, room_handle: room.room_handle },
     agent: { agent_id: agent.agent_id, agent_handle: agent.agent_handle },
     agent_token_id: tokenBody.agent_token_id,
@@ -1862,7 +1785,7 @@ export default function parleExtension(pi: any) {
   pi.registerTool({
     name: "parle_login",
     label: "Parle Login",
-    description: "First-class Parle email login and local credential bootstrap. Complete persists the human session cookie in project .parle/credentials, mints a room-bound agent token, and atomically writes a named 0600 profile in ~/.parle/profiles. The profile defaults to default. Existing profiles require force=true and replacements return the prior agent_token_id when available. Secrets are never returned in tool output.",
+    description: "First-class Parle email login and local credential bootstrap. Complete persists the human session cookie to a session file beside the resolved profile catalog, mints a room-bound agent token, and atomically writes a named 0600 profile to that catalog (~/.parle/profiles by default, PARLE_PROFILES_PATH to relocate). The profile defaults to default. Existing profiles require force=true and replacements return the prior agent_token_id when available. Secrets are never returned in tool output.",
     parameters: Type.Object({
       action: Type.Optional(Type.Unsafe({ type: "string", enum: ["start", "complete", "mint-from-session"] })),
       email: Type.Optional(Type.String()),
@@ -1871,8 +1794,7 @@ export default function parleExtension(pi: any) {
       roomHandle: Type.Optional(Type.String({ description: "Room selector. Overrides resolved PARLE_ROOM_HANDLE." })),
       agentId: Type.Optional(Type.String({ description: "Agent selector. Overrides resolved PARLE_AGENT_ID." })),
       agentHandle: Type.Optional(Type.String({ description: "Agent selector. Overrides resolved PARLE_AGENT_HANDLE." })),
-      writeCredentials: Type.Optional(Type.Boolean({ description: "Must remain true for complete and mint-from-session so plaintext credentials are durably recovered." })),
-      updateGitignore: Type.Optional(Type.Boolean()),
+      writeCredentials: Type.Optional(Type.Boolean({ description: "Must remain true for complete and mint-from-session so plaintext credentials are durably recovered (session cookie and profile persist beside the resolved profile catalog)." })),
       profile: Type.Optional(Type.String({ description: "Safe local profile label.", default: "default" })),
       force: Type.Optional(Type.Boolean({ description: "Required to replace an existing profile section." })),
       reason: Type.Optional(Type.String()),

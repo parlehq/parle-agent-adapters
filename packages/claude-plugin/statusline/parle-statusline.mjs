@@ -91,7 +91,21 @@ function main() {
     }
     return;
   }
-  if (existsSync(join(cwd, ".parle", "credentials"))) process.stdout.write("parle · off");
+  if (parleConfiguredHint(cwd)) process.stdout.write("parle · off");
+}
+
+// "Configured but disconnected" heuristic: the project .env names a Parle
+// binding (selector, catalog override, or direct room binding). Key names
+// only; values are never read past the match. A user-level catalog alone is
+// deliberately not a hint: it would flag every repo on the machine.
+function parleConfiguredHint(cwd) {
+  try {
+    const envPath = join(cwd, ".env");
+    if (!existsSync(envPath)) return false;
+    return /^\s*PARLE_(PROFILE|PROFILES_PATH|ROOM_ID|ROOM_AGENT_TOKEN)\s*=/m.test(readFileSync(envPath, "utf8"));
+  } catch {
+    return false;
+  }
 }
 
 // Freshness gate: a count is asserted only while recent (about 2.5 producer

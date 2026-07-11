@@ -30955,7 +30955,7 @@ var StdioServerTransport = class {
 // src/index.ts
 import { spawn } from "node:child_process";
 import { existsSync as existsSync3 } from "node:fs";
-import { dirname, join as join4 } from "node:path";
+import { dirname as dirname2, join as join4 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // ../client/dist/index.js
@@ -31087,17 +31087,32 @@ var entries = {
 var ERROR_REGISTRY = Object.fromEntries(Object.entries(entries).map(([code, entry]) => [code, { ...entry, retryable: retryable(entry.action) }]));
 
 // ../client/dist/profiles.js
+import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync as readFileSync2, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join as join2 } from "node:path";
+import { dirname, isAbsolute, join as join2 } from "node:path";
 var PROFILE_CATALOG_PATH = join2(homedir(), ".parle", "profiles");
 function profileCatalogPath(env = process.env) {
   const home = env.HOME || env.USERPROFILE || homedir();
   return join2(home, ".parle", "profiles");
 }
-function profileCatalogPaths(cwd = process.cwd(), env = process.env) {
-  const paths = [profileCatalogPath(env), join2(cwd, ".parle", "profiles")];
-  return [...new Set(paths)];
+function resolveProfileCatalogPath(override, cwd = process.cwd(), env = process.env) {
+  if (override)
+    return isAbsolute(override) ? override : join2(cwd, override);
+  return profileCatalogPath(env);
+}
+function catalogGitExposureWarning(path) {
+  if (!existsSync(path))
+    return void 0;
+  try {
+    execFileSync("git", ["check-ignore", "-q", "--", path], { cwd: dirname(path), stdio: "ignore" });
+    return void 0;
+  } catch (error51) {
+    if (error51?.status === 1) {
+      return `Parle profile catalog ${path} is inside a git work tree and not git-ignored. Add it to .gitignore so agent tokens can never enter version control.`;
+    }
+    return void 0;
+  }
 }
 var ProfileConfigError = class extends Error {
   constructor(message) {
@@ -31163,36 +31178,22 @@ function parseProfiles(text, path = PROFILE_CATALOG_PATH) {
   return profiles;
 }
 function profileCatalogHasProfile(name, path = PROFILE_CATALOG_PATH) {
-  const paths = Array.isArray(path) ? path : [path];
-  for (const candidate of paths) {
-    if (!existsSync(candidate))
-      continue;
-    assertSafeCatalog(candidate);
-    if (parseProfiles(readFileSync2(candidate, "utf8"), candidate).has(name))
-      return true;
-  }
-  return false;
+  if (!existsSync(path))
+    return false;
+  assertSafeCatalog(path);
+  return parseProfiles(readFileSync2(path, "utf8"), path).has(name);
 }
 function loadProfile(name, path = PROFILE_CATALOG_PATH) {
-  const paths = Array.isArray(path) ? path : [path];
-  const seenCatalogs = [];
-  const availableProfiles = [];
-  for (const candidate of paths) {
-    if (!existsSync(candidate))
-      continue;
-    seenCatalogs.push(candidate);
-    assertSafeCatalog(candidate);
-    const profiles = parseProfiles(readFileSync2(candidate, "utf8"), candidate);
-    const profile = profiles.get(name);
-    if (profile)
-      return profile;
-    availableProfiles.push(...profiles.keys());
+  if (!existsSync(path)) {
+    throw new ProfileConfigError(`Parle profile catalog is missing: ${path}. Create one with [${name}], room_id, and agent_token.`);
   }
-  if (seenCatalogs.length === 0) {
-    throw new ProfileConfigError(`Parle profile catalog is missing: ${paths.join(", ")}. Create one with [${name}], room_id, and agent_token.`);
-  }
-  const available = [...new Set(availableProfiles)].join(", ") || "none";
-  throw new ProfileConfigError(`Parle profile ${name} was not found in ${seenCatalogs.join(", ")}. Available profiles: ${available}`);
+  assertSafeCatalog(path);
+  const profiles = parseProfiles(readFileSync2(path, "utf8"), path);
+  const profile = profiles.get(name);
+  if (profile)
+    return profile;
+  const available = [...profiles.keys()].join(", ") || "none";
+  throw new ProfileConfigError(`Parle profile ${name} was not found in ${path}. Available profiles: ${available}`);
 }
 
 // ../client/dist/format.js
@@ -31345,7 +31346,7 @@ function firstConfigValue(name, sources, fallback) {
   }
   return { value: fallback, source: fallback === void 0 ? "missing" : "default" };
 }
-function versionConfig(env, dotEnv, credentials, warnings) {
+function versionConfig(env, dotEnv, warnings) {
   if (env.PARLE_VERSION) {
     if (env.PARLE_VERSION !== DEFAULT_VERSION) {
       warnings.push(`PARLE_VERSION is explicitly set in the process environment to ${env.PARLE_VERSION}, overriding the adapter default ${DEFAULT_VERSION}. Use this only for staging or rollback.`);
@@ -31354,38 +31355,38 @@ function versionConfig(env, dotEnv, credentials, warnings) {
   }
   if (dotEnv.PARLE_VERSION)
     warnings.push(`Ignoring PARLE_VERSION from .env (${dotEnv.PARLE_VERSION}); the adapter default is ${DEFAULT_VERSION}. Use process env only for advanced version overrides.`);
-  if (credentials.PARLE_VERSION)
-    warnings.push(`Ignoring stale PARLE_VERSION from .parle/credentials (${credentials.PARLE_VERSION}); the adapter default is ${DEFAULT_VERSION}. Use process env only for advanced version overrides.`);
   return { value: DEFAULT_VERSION, source: "default" };
 }
 function resolveConfig(cwd = process.cwd(), env = process.env) {
   const dotEnv = readKeyValueFile(join3(cwd, ".env"));
-  const credentials = readKeyValueFile(join3(cwd, ".parle", "credentials"));
   const sources = [
     { name: "env", values: env },
-    { name: ".env", values: dotEnv },
-    { name: ".parle/credentials", values: credentials }
+    { name: ".env", values: dotEnv }
   ];
   const warnings = [];
   const directBindingKeys = ["PARLE_ROOM_ID", "PARLE_ROOM_AGENT_TOKEN", "PARLE_AGENT_TOKEN_ID", "PARLE_ROOM_HANDLE", "PARLE_API_BASE", "PARLE_WAKE_BASE"];
   const directValues = directBindingKeys.map((key) => firstConfigValue(key, sources)).filter((value) => value.value);
   const explicitProfile = firstConfigValue("PARLE_PROFILE", sources);
-  const catalogPaths = profileCatalogPaths(cwd, env);
-  const profileSelector = explicitProfile.value ? explicitProfile : directValues.length === 0 && profileCatalogHasProfile("default", catalogPaths) ? { value: "default", source: "profile_catalog" } : explicitProfile;
+  const catalogOverride = firstConfigValue("PARLE_PROFILES_PATH", sources);
+  const catalogPath = resolveProfileCatalogPath(catalogOverride.value, cwd, env);
+  const gitExposure = catalogGitExposureWarning(catalogPath);
+  if (gitExposure)
+    warnings.push(gitExposure);
+  const profileSelector = explicitProfile.value ? explicitProfile : directValues.length === 0 && profileCatalogHasProfile("default", catalogPath) ? { value: "default", source: "profile_catalog" } : explicitProfile;
   let profile;
   if (profileSelector.value) {
     if (directValues.length) {
       const conflicts = directValues.map((value) => `${value.source}`);
       throw new Error(`PARLE_PROFILE from ${profileSelector.source} conflicts with direct configuration (${conflicts.join(", ")}). Remove the direct variables or unset PARLE_PROFILE.`);
     }
-    profile = loadProfile(profileSelector.value, catalogPaths);
+    profile = loadProfile(profileSelector.value, catalogPath);
   }
   const profileValue = (name, value) => value === void 0 ? void 0 : { value, source: `profile:${profile.name}` };
   const cfg = {
     enabledInput: firstConfigValue("PARLE_ENABLED", sources, "1"),
     apiBase: profile ? profileValue("PARLE_API_BASE", profile.apiBase ?? DEFAULT_API_BASE) : firstConfigValue("PARLE_API_BASE", sources, DEFAULT_API_BASE),
     wakeBase: profile ? profileValue("PARLE_WAKE_BASE", profile.wakeBase ?? DEFAULT_WAKE_BASE) : firstConfigValue("PARLE_WAKE_BASE", sources, DEFAULT_WAKE_BASE),
-    version: versionConfig(env, dotEnv, credentials, warnings),
+    version: versionConfig(env, dotEnv, warnings),
     roomId: profile ? profileValue("PARLE_ROOM_ID", profile.roomId) : firstConfigValue("PARLE_ROOM_ID", sources),
     roomHandle: profile ? void 0 : firstConfigValue("PARLE_ROOM_HANDLE", sources),
     agentToken: profile ? profileValue("PARLE_ROOM_AGENT_TOKEN", profile.agentToken) : firstConfigValue("PARLE_ROOM_AGENT_TOKEN", sources),
@@ -31685,7 +31686,7 @@ var ParleAgentClient = class {
       missing.push("PARLE_ROOM_ID");
     if (!this.cfg.agentToken?.value)
       missing.push("PARLE_ROOM_AGENT_TOKEN");
-    const note = missing.length ? "Set PARLE_PROFILE (a ~/.parle/profiles section) or direct configuration in env or .env (checked in that order; disk token rotations can be reloaded once during bootstrap recovery)." : this.runtime.bootstrapped ? "Parle configuration is present and this process holds a session." : "Parle configuration is present. Not yet connected in this process; a connect, read, or send call establishes the session.";
+    const note = missing.length ? "Set PARLE_PROFILE (a section of the profile catalog, ~/.parle/profiles by default, PARLE_PROFILES_PATH to relocate) or direct configuration in env or .env (checked in that order; disk token rotations can be reloaded once during bootstrap recovery)." : this.runtime.bootstrapped ? "Parle configuration is present and this process holds a session." : "Parle configuration is present. Not yet connected in this process; a connect, read, or send call establishes the session.";
     const staleToken = this.staleTokenHint();
     return { ok: missing.length === 0 && !staleToken, missing, connected: this.runtime.bootstrapped, apiBase: this.cfg.apiBase.value, note, ...staleToken ? { warning: staleToken } : {} };
   }
@@ -31696,19 +31697,16 @@ var ParleAgentClient = class {
     const current = this.cfg.agentToken?.value;
     if (!current)
       return void 0;
-    for (const rel of [".env", ".parle/credentials"]) {
-      try {
-        const onDisk = readKeyValueFile(join3(this.cwd, rel))["PARLE_ROOM_AGENT_TOKEN"];
-        if (onDisk === void 0 || onDisk === "")
-          continue;
-        if (onDisk === current)
-          return void 0;
-        return `PARLE_ROOM_AGENT_TOKEN in ${rel} differs from the value this process loaded at startup (source: ${this.cfg.agentToken?.source}). The token was likely rotated. Parle will try to reload it during the next bootstrap; restart the host process if the terminal error remains.`;
-      } catch {
+    try {
+      const onDisk = readKeyValueFile(join3(this.cwd, ".env"))["PARLE_ROOM_AGENT_TOKEN"];
+      if (onDisk === void 0 || onDisk === "")
         return void 0;
-      }
+      if (onDisk === current)
+        return void 0;
+      return `PARLE_ROOM_AGENT_TOKEN in .env differs from the value this process loaded at startup (source: ${this.cfg.agentToken?.source}). The token was likely rotated. Parle will try to reload it during the next bootstrap; restart the host process if the terminal error remains.`;
+    } catch {
+      return void 0;
     }
-    return void 0;
   }
   refreshConfigIfAgentTokenChanged() {
     const oldToken = this.cfg.agentToken?.value;
@@ -32244,7 +32242,7 @@ function createParleMcpServer(client = new ParleAgentClient()) {
   return server;
 }
 async function runStdio() {
-  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.4" } });
+  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.5" } });
   const server = createParleMcpServer(client);
   installLifecycleHandlers(client);
   await server.connect(new StdioServerTransport());
@@ -32292,10 +32290,11 @@ function resolveWatcherEnvironment(cwd = process.cwd(), env = process.env, onWar
   const roomId = config2.roomId?.value;
   const agentToken = config2.agentToken?.value;
   if (!roomId || !agentToken) {
-    throw new Error("required host configuration is missing. Set PARLE_PROFILE or PARLE_ROOM_ID / PARLE_ROOM_AGENT_TOKEN in env, ./.env, or ./.parle/credentials (run from the project directory)");
+    throw new Error("required host configuration is missing. Set PARLE_PROFILE (profile catalog; PARLE_PROFILES_PATH relocates it) or PARLE_ROOM_ID / PARLE_ROOM_AGENT_TOKEN in env or ./.env (run from the project directory)");
   }
   const childEnv = { ...env };
   delete childEnv.PARLE_PROFILE;
+  delete childEnv.PARLE_PROFILES_PATH;
   return {
     ...childEnv,
     PARLE_API_BASE: config2.apiBase.value,
@@ -32306,7 +32305,7 @@ function resolveWatcherEnvironment(cwd = process.cwd(), env = process.env, onWar
   };
 }
 async function runWatcher(metaUrl, args, cwd = process.cwd(), env = process.env) {
-  const worker = join4(dirname(fileURLToPath(metaUrl)), "..", "skills", "parle", "scripts", "parle-watch-worker.sh");
+  const worker = join4(dirname2(fileURLToPath(metaUrl)), "..", "skills", "parle", "scripts", "parle-watch-worker.sh");
   if (!existsSync3(worker)) throw new Error("bundled watcher worker is missing; reinstall or rebuild the Claude plugin");
   const childEnv = resolveWatcherEnvironment(cwd, env, (warning) => console.error(`Parle warning: ${warning}`));
   childEnv.PARLE_WATCH_REQUEST_HELPER = fileURLToPath(metaUrl);

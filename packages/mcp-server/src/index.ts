@@ -121,7 +121,7 @@ export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgent
 }
 
 export async function runStdio() {
-  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.4" } });
+  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.5" } });
   const server = createParleMcpServer(client);
   installLifecycleHandlers(client);
   await server.connect(new StdioServerTransport());
@@ -181,10 +181,13 @@ export function resolveWatcherEnvironment(cwd = process.cwd(), env: NodeJS.Proce
   const roomId = config.roomId?.value;
   const agentToken = config.agentToken?.value;
   if (!roomId || !agentToken) {
-    throw new Error("required host configuration is missing. Set PARLE_PROFILE or PARLE_ROOM_ID / PARLE_ROOM_AGENT_TOKEN in env, ./.env, or ./.parle/credentials (run from the project directory)");
+    throw new Error("required host configuration is missing. Set PARLE_PROFILE (profile catalog; PARLE_PROFILES_PATH relocates it) or PARLE_ROOM_ID / PARLE_ROOM_AGENT_TOKEN in env or ./.env (run from the project directory)");
   }
+  // The child receives fully resolved direct values; drop the selector and
+  // catalog-path settings so it cannot re-resolve against a different catalog.
   const childEnv = { ...env };
   delete childEnv.PARLE_PROFILE;
+  delete childEnv.PARLE_PROFILES_PATH;
   return {
     ...childEnv,
     PARLE_API_BASE: config.apiBase.value,

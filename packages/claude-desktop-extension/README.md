@@ -12,7 +12,7 @@ Claude Desktop collects these values through the MCPB user configuration form:
 - `PARLE_ROOM_ID`
 - `PARLE_ROOM_AGENT_TOKEN`, marked sensitive
 
-Desktop setup is env-only in v1. Project `.env` and `.parle/credentials` discovery are not documented as a supported Desktop setup path because Claude Desktop controls the server working directory.
+Desktop setup is env-only in v1. Project `.env` discovery is not documented as a supported Desktop setup path because Claude Desktop controls the server working directory.
 
 ## Validation
 

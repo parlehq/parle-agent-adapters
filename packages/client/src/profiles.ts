@@ -3,9 +3,10 @@
 // harness loads pi-extension straight from source under jiti with no
 // workspace node_modules, so pi-extension cannot import @parlehq/agent-client.
 // A pi-extension test enforces the parity. Edit both copies together.
+import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 export const PROFILE_CATALOG_PATH = join(homedir(), ".parle", "profiles");
 
@@ -14,9 +15,30 @@ export function profileCatalogPath(env: Record<string, string | undefined> = pro
   return join(home, ".parle", "profiles");
 }
 
-export function profileCatalogPaths(cwd = process.cwd(), env: Record<string, string | undefined> = process.env): string[] {
-  const paths = [profileCatalogPath(env), join(cwd, ".parle", "profiles")];
-  return [...new Set(paths)];
+// Exactly one catalog per process. PARLE_PROFILES_PATH (a non-secret setting,
+// resolved like PARLE_PROFILE: process env then project .env) REPLACES the
+// default path entirely; there is no layering or merging of catalogs. A
+// relative override resolves against the project cwd.
+export function resolveProfileCatalogPath(override: string | undefined, cwd = process.cwd(), env: Record<string, string | undefined> = process.env): string {
+  if (override) return isAbsolute(override) ? override : join(cwd, override);
+  return profileCatalogPath(env);
+}
+
+// Warn-only guard for the original .parle/credentials hazard: an operator may
+// point PARLE_PROFILES_PATH inside a repo deliberately, but the catalog must
+// never enter version control. git check-ignore is authoritative and cheap;
+// any git failure (not a work tree, git absent) means no warning.
+export function catalogGitExposureWarning(path: string): string | undefined {
+  if (!existsSync(path)) return undefined;
+  try {
+    execFileSync("git", ["check-ignore", "-q", "--", path], { cwd: dirname(path), stdio: "ignore" });
+    return undefined;
+  } catch (error: any) {
+    if (error?.status === 1) {
+      return `Parle profile catalog ${path} is inside a git work tree and not git-ignored. Add it to .gitignore so agent tokens can never enter version control.`;
+    }
+    return undefined;
+  }
 }
 
 export type CredentialProfile = {
@@ -81,37 +103,24 @@ export function parseProfiles(text: string, path = PROFILE_CATALOG_PATH): Map<st
   return profiles;
 }
 
-export function profileCatalogExists(path: string | string[] = PROFILE_CATALOG_PATH): boolean {
-  const paths = Array.isArray(path) ? path : [path];
-  return paths.some((candidate) => existsSync(candidate));
+export function profileCatalogExists(path: string = PROFILE_CATALOG_PATH): boolean {
+  return existsSync(path);
 }
 
-export function profileCatalogHasProfile(name: string, path: string | string[] = PROFILE_CATALOG_PATH): boolean {
-  const paths = Array.isArray(path) ? path : [path];
-  for (const candidate of paths) {
-    if (!existsSync(candidate)) continue;
-    assertSafeCatalog(candidate);
-    if (parseProfiles(readFileSync(candidate, "utf8"), candidate).has(name)) return true;
-  }
-  return false;
+export function profileCatalogHasProfile(name: string, path: string = PROFILE_CATALOG_PATH): boolean {
+  if (!existsSync(path)) return false;
+  assertSafeCatalog(path);
+  return parseProfiles(readFileSync(path, "utf8"), path).has(name);
 }
 
-export function loadProfile(name: string, path: string | string[] = PROFILE_CATALOG_PATH): CredentialProfile {
-  const paths = Array.isArray(path) ? path : [path];
-  const seenCatalogs: string[] = [];
-  const availableProfiles: string[] = [];
-  for (const candidate of paths) {
-    if (!existsSync(candidate)) continue;
-    seenCatalogs.push(candidate);
-    assertSafeCatalog(candidate);
-    const profiles = parseProfiles(readFileSync(candidate, "utf8"), candidate);
-    const profile = profiles.get(name);
-    if (profile) return profile;
-    availableProfiles.push(...profiles.keys());
+export function loadProfile(name: string, path: string = PROFILE_CATALOG_PATH): CredentialProfile {
+  if (!existsSync(path)) {
+    throw new ProfileConfigError(`Parle profile catalog is missing: ${path}. Create one with [${name}], room_id, and agent_token.`);
   }
-  if (seenCatalogs.length === 0) {
-    throw new ProfileConfigError(`Parle profile catalog is missing: ${paths.join(", ")}. Create one with [${name}], room_id, and agent_token.`);
-  }
-  const available = [...new Set(availableProfiles)].join(", ") || "none";
-  throw new ProfileConfigError(`Parle profile ${name} was not found in ${seenCatalogs.join(", ")}. Available profiles: ${available}`);
+  assertSafeCatalog(path);
+  const profiles = parseProfiles(readFileSync(path, "utf8"), path);
+  const profile = profiles.get(name);
+  if (profile) return profile;
+  const available = [...profiles.keys()].join(", ") || "none";
+  throw new ProfileConfigError(`Parle profile ${name} was not found in ${path}. Available profiles: ${available}`);
 }

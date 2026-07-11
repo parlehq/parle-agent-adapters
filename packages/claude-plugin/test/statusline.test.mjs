@@ -58,7 +58,7 @@ function scaffold(files, { credentials = false } = {}) {
   for (const [name, content] of Object.entries(files)) {
     writeFileSync(join(dir, name), typeof content === "string" ? content : JSON.stringify(content));
   }
-  if (credentials) writeFileSync(join(cwd, ".parle", "credentials"), "PARLE_ROOM_ID=room-1\n");
+  if (credentials) writeFileSync(join(cwd, ".env"), "PARLE_PROFILE=galexc\n");
   return cwd;
 }
 
