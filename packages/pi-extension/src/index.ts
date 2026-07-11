@@ -2,9 +2,10 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { loadProfile, parseProfiles, profileCatalogExists, profileCatalogPath, type CredentialProfile } from "@parlehq/agent-client";
 import { Type } from "typebox";
 const EXTENSION_ID = "25-parle";
-const PI_EXTENSION_VERSION = "0.1.5";
+const PI_EXTENSION_VERSION = "0.1.6";
 const RUNTIME_SCHEMA_VERSION = 1;
 const DEFAULT_API_BASE = "https://api.parle.sh";
 const DEFAULT_VERSION = "2026-07-07";
@@ -26,7 +27,7 @@ const FOOTER_FAILURE_THRESHOLD = 3;
 const FOOTER_FAILURE_AGE_MS = 60_000;
 const INJECTED_KEY_LIMIT = 4096;
 
-type SourceKind = "env" | "project_env" | "project_parle" | "default";
+type SourceKind = "env" | "project_env" | "project_parle" | "profile_catalog" | `profile:${string}` | "default";
 
 type ConfigValue = {
   value: string;
@@ -52,6 +53,7 @@ type ParleConfig = {
   sessionAlias?: ConfigValue;
   watchEnabled: ConfigValue;
   wakeBase: ConfigValue;
+  profile?: ConfigValue;
   warnings: string[];
 };
 
@@ -114,6 +116,8 @@ type ParleLoginParams = {
   agentHandle?: string;
   writeCredentials?: boolean;
   updateGitignore?: boolean;
+  profile?: string;
+  force?: boolean;
   reason?: string;
 };
 
@@ -196,20 +200,17 @@ function makeValue(value: string | undefined, source: SourceKind, key: string, s
 function resolveConfig(cwd: string): ParleConfig {
   const projectEnv = readKeyValueFile(join(cwd, ".env"));
   const projectParle = { ...readKeyValueFile(join(cwd, ".parle", "credentials")) };
-  const enabledInput = firstConfigValue([
-    makeValue(process.env.PARLE_ENABLED, "env", "PARLE_ENABLED"),
-    makeValue(projectEnv.PARLE_ENABLED, "project_env", "PARLE_ENABLED"),
-    makeValue(projectParle.PARLE_ENABLED, "project_parle", "PARLE_ENABLED"),
-  ]) || { value: "<unset>", source: "default", key: "PARLE_ENABLED" };
+  const sourceCandidates = (key: string, secret = false): Array<ConfigValue | undefined> => [
+    makeValue(process.env[key], "env", key, secret),
+    makeValue(projectEnv[key], "project_env", key, secret, secret ? "secret comes from project .env" : undefined),
+    makeValue(projectParle[key], "project_parle", key, secret, secret ? "secret comes from project .parle/credentials" : undefined),
+  ];
+  const enabledInput = firstConfigValue(sourceCandidates("PARLE_ENABLED")) || { value: "<unset>", source: "default", key: "PARLE_ENABLED" };
   const enabled = enabledInput.value === "<unset>" ? true : parseBoolEnabled(enabledInput.value);
   const warnings: string[] = [];
 
   function pick(key: string, fallback: string | undefined, secret = false): ConfigValue {
-    const value = firstConfigValue([
-      makeValue(process.env[key], "env", key, secret),
-      makeValue(projectEnv[key], "project_env", key, secret, secret ? "secret comes from project .env" : undefined),
-      makeValue(projectParle[key], "project_parle", key, secret, secret ? "secret comes from project .parle/credentials" : undefined),
-    ]);
+    const value = firstConfigValue(sourceCandidates(key, secret));
     return value || { value: fallback || "", source: "default", key, secret };
   }
 
@@ -228,31 +229,57 @@ function resolveConfig(cwd: string): ParleConfig {
     return { value: DEFAULT_VERSION, source: "default", key: "PARLE_VERSION" };
   }
 
+  const directBindingKeys = ["PARLE_ROOM_ID", "PARLE_ROOM_AGENT_TOKEN", "PARLE_AGENT_TOKEN_ID", "PARLE_ROOM_HANDLE", "PARLE_API_BASE", "PARLE_WAKE_BASE"];
+  const directValues = directBindingKeys.flatMap((key) => {
+    const value = firstConfigValue(sourceCandidates(key, key === "PARLE_ROOM_AGENT_TOKEN"));
+    return value ? [value] : [];
+  });
+  const explicitProfile = firstConfigValue(sourceCandidates("PARLE_PROFILE"));
+  const catalogPath = profileCatalogPath(process.env);
+  const profileSelector = explicitProfile || (directValues.length === 0 && profileCatalogExists(catalogPath)
+    ? { value: "default", source: "profile_catalog" as const, key: "PARLE_PROFILE" }
+    : undefined);
+  let profile: CredentialProfile | undefined;
+  if (profileSelector) {
+    if (directValues.length) {
+      const conflicts = directValues.map((value) => `${value.key} from ${value.source}`);
+      throw new Error(`PARLE_PROFILE from ${profileSelector.source} conflicts with direct configuration (${conflicts.join(", ")}). Remove the direct variables or unset PARLE_PROFILE.`);
+    }
+    profile = loadProfile(profileSelector.value, catalogPath);
+  }
+  const fromProfile = (key: string, value: string | undefined, fallback = "", secret = false): ConfigValue => ({
+    value: value ?? fallback,
+    source: `profile:${profile!.name}`,
+    key,
+    secret,
+  });
+
   const cfg: ParleConfig = {
     enabled,
     enabledInput,
-    apiBase: pick("PARLE_API_BASE", DEFAULT_API_BASE),
+    apiBase: profile ? fromProfile("PARLE_API_BASE", profile.apiBase, DEFAULT_API_BASE) : pick("PARLE_API_BASE", DEFAULT_API_BASE),
     version: pickVersion(),
-    roomId: pick("PARLE_ROOM_ID", undefined),
-    roomHandle: pick("PARLE_ROOM_HANDLE", undefined),
-    agentToken: pick("PARLE_ROOM_AGENT_TOKEN", undefined, true),
-    agentTokenId: pick("PARLE_AGENT_TOKEN_ID", undefined),
+    roomId: profile ? fromProfile("PARLE_ROOM_ID", profile.roomId) : pick("PARLE_ROOM_ID", undefined),
+    roomHandle: profile ? undefined : pick("PARLE_ROOM_HANDLE", undefined),
+    agentToken: profile ? fromProfile("PARLE_ROOM_AGENT_TOKEN", profile.agentToken, "", true) : pick("PARLE_ROOM_AGENT_TOKEN", undefined, true),
+    agentTokenId: profile ? (profile.agentTokenId ? fromProfile("PARLE_AGENT_TOKEN_ID", profile.agentTokenId) : undefined) : pick("PARLE_AGENT_TOKEN_ID", undefined),
     agentId: pick("PARLE_AGENT_ID", undefined),
     principalHandle: pick("PARLE_PRINCIPAL_HANDLE", undefined),
     agentHandle: pick("PARLE_AGENT_HANDLE", undefined),
     sessionCookie: pick("PARLE_SESSION_COOKIE", undefined, true),
     sessionAlias: pick("PARLE_SESSION_ALIAS", undefined),
     watchEnabled: pick("PARLE_WATCH_ENABLED", "1"),
-    wakeBase: pick("PARLE_WAKE_BASE", undefined),
+    wakeBase: profile ? fromProfile("PARLE_WAKE_BASE", profile.wakeBase, DEFAULT_API_BASE) : pick("PARLE_WAKE_BASE", undefined),
+    profile: profileSelector,
     warnings,
   };
-  for (const value of [cfg.apiBase, cfg.wakeBase, cfg.version, cfg.roomId, cfg.roomHandle, cfg.agentToken, cfg.agentTokenId, cfg.agentId, cfg.principalHandle, cfg.agentHandle, cfg.sessionCookie, cfg.sessionAlias, cfg.watchEnabled]) {
+  for (const value of [cfg.apiBase, cfg.wakeBase, cfg.version, cfg.roomId, cfg.roomHandle, cfg.agentToken, cfg.agentTokenId, cfg.agentId, cfg.principalHandle, cfg.agentHandle, cfg.sessionCookie, cfg.sessionAlias, cfg.watchEnabled, cfg.profile]) {
     if (value?.warning) cfg.warnings.push(value.warning);
   }
   // Process env is a startup snapshot; project .env is regenerated on rotation.
   // When they disagree on the token, the snapshot is almost certainly stale.
   const diskToken = projectEnv.PARLE_ROOM_AGENT_TOKEN || projectParle.PARLE_ROOM_AGENT_TOKEN;
-  if (cfg.agentToken?.source === "env" && diskToken && diskToken !== cfg.agentToken?.value) {
+  if (!profile && cfg.agentToken?.source === "env" && diskToken && diskToken !== cfg.agentToken?.value) {
     cfg.warnings.push("PARLE_ROOM_AGENT_TOKEN on disk differs from the process environment snapshot. The token was likely rotated. Restart the harness process to reload it.");
   }
   return cfg;
@@ -566,6 +593,98 @@ function writeCredentialFile(cwd: string, values: Record<string, string | undefi
   }
 }
 
+const PROFILE_LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+function assertProfileLabel(label: string): void {
+  if (!PROFILE_LABEL_RE.test(label)) {
+    throw new Error("Parle profile must be 1 to 64 characters and contain only letters, numbers, dot, underscore, or hyphen, starting with a letter or number.");
+  }
+}
+
+function ensureProfileDirectory(path: string): void {
+  const dir = join(path, "..");
+  if (existsSync(dir)) {
+    const stat = lstatSync(dir);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`Refusing to write Parle profiles because ${dir} is not a regular directory.`);
+  } else {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+  chmodSync(dir, 0o700);
+}
+
+function assertSafeProfilePath(path: string): void {
+  if (!existsSync(path)) return;
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Refusing to write Parle profiles because ${path} is not a regular file.`);
+  if (process.platform !== "win32" && stat.uid !== process.getuid?.()) throw new Error(`Refusing to write Parle profiles because ${path} is not owned by the current user.`);
+}
+
+function profileSectionRange(text: string, label: string): { start: number; end: number } | undefined {
+  const headers: Array<{ label: string; start: number }> = [];
+  const lineRe = /(?:^|(?<=\n))[^\n]*(?:\n|$)/g;
+  for (const match of text.matchAll(lineRe)) {
+    const raw = match[0].replace(/\r?\n$/, "");
+    const section = raw.trim().match(/^\[([^\]\r\n]+)\]$/);
+    if (section) headers.push({ label: section[1], start: match.index! });
+  }
+  const index = headers.findIndex((header) => header.label === label);
+  if (index < 0) return undefined;
+  return { start: headers[index].start, end: headers[index + 1]?.start ?? text.length };
+}
+
+function renderedProfileSection(profile: CredentialProfile): string {
+  return [
+    `[${profile.name}]`,
+    `room_id = ${profile.roomId}`,
+    `agent_token = ${profile.agentToken}`,
+    profile.agentTokenId ? `agent_token_id = ${profile.agentTokenId}` : undefined,
+    profile.apiBase && profile.apiBase !== DEFAULT_API_BASE ? `api_base = ${profile.apiBase}` : undefined,
+    profile.wakeBase && profile.wakeBase !== DEFAULT_API_BASE ? `wake_base = ${profile.wakeBase}` : undefined,
+  ].filter(Boolean).join("\n") + "\n";
+}
+
+function preflightProfileSink(label: string, force: boolean): { path: string; exists: boolean } {
+  assertProfileLabel(label);
+  const path = profileCatalogPath(process.env);
+  ensureProfileDirectory(path);
+  assertSafeProfilePath(path);
+  const text = existsSync(path) ? readFileSync(path, "utf8") : "";
+  if (text) parseProfiles(text, path);
+  const exists = Boolean(profileSectionRange(text, label));
+  if (exists && !force) throw new Error(`Parle profile ${label} already exists in ${path}. Pass force=true to replace only that profile.`);
+  const probe = join(path, `../.profiles-write-test-${process.pid}`);
+  writeFileSync(probe, "ok\n", { mode: 0o600 });
+  chmodSync(probe, 0o600);
+  unlinkSync(probe);
+  return { path, exists };
+}
+
+function writeProfile(profile: CredentialProfile, force: boolean): { path: string; replaced: boolean } {
+  const preflight = preflightProfileSink(profile.name, force);
+  const original = existsSync(preflight.path) ? readFileSync(preflight.path, "utf8") : "";
+  const range = profileSectionRange(original, profile.name);
+  const section = renderedProfileSection(profile);
+  let updated: string;
+  if (range) {
+    updated = original.slice(0, range.start) + section + original.slice(range.end);
+  } else {
+    const separator = original.length === 0 || original.endsWith("\n") ? "" : "\n";
+    updated = original + separator + section;
+  }
+  parseProfiles(updated, preflight.path);
+  const tempPath = join(preflight.path, `../.profiles.${process.pid}.${Date.now()}.tmp`);
+  try {
+    writeFileSync(tempPath, updated, { mode: 0o600 });
+    chmodSync(tempPath, 0o600);
+    renameSync(tempPath, preflight.path);
+    chmodSync(preflight.path, 0o600);
+  } catch (error) {
+    try { if (existsSync(tempPath)) unlinkSync(tempPath); } catch {}
+    throw error;
+  }
+  return { path: preflight.path, replaced: preflight.exists };
+}
+
 function getSetCookieHeaders(headers: Headers): string[] {
   const rawGetSetCookie = (headers as any).getSetCookie;
   if (typeof rawGetSetCookie === "function") return rawGetSetCookie.call(headers);
@@ -637,6 +756,7 @@ async function parleLogin(ctx: any, cfg: ParleConfig, params: ParleLoginParams, 
   const action = params.action || (params.code ? "complete" : "start");
   const writeCredentials = params.writeCredentials !== false;
   const updateGitignore = params.updateGitignore !== false;
+  const profileName = params.profile || "default";
   const cwd = ctx.cwd || process.cwd();
 
   if (action === "start") {
@@ -662,6 +782,7 @@ async function parleLogin(ctx: any, cfg: ParleConfig, params: ParleLoginParams, 
     if (!params.code) throw new Error("parle_login complete requires code.");
     if (!writeCredentials) throw new Error("parle_login complete refuses writeCredentials=false because it would consume a one-time code without durable credential recovery.");
     preflightCredentialSink(cwd, updateGitignore);
+    preflightProfileSink(profileName, params.force === true);
     const response = await fetch(new URL("/v/auth/email/complete", cfg.apiBase.value), {
       method: "POST",
       headers: { Accept: "application/json", "Content-Type": "application/json", "Parle-Version": cfg.version.value || DEFAULT_VERSION },
@@ -673,16 +794,13 @@ async function parleLogin(ctx: any, cfg: ParleConfig, params: ParleLoginParams, 
     sessionCookie = extractSessionCookie(response.headers);
     if (!sessionCookie) throw new Error("Parle email login completed but no __Host-parle_session Set-Cookie header was present. Credential persistence cannot continue safely.");
     if (writeCredentials) {
-      writeCredentialFile(cwd, {
-        PARLE_API_BASE: cfg.apiBase.value || DEFAULT_API_BASE,
-        PARLE_WAKE_BASE: cfg.wakeBase.value || undefined,
-        PARLE_SESSION_COOKIE: sessionCookie,
-      });
+      writeCredentialFile(cwd, { PARLE_SESSION_COOKIE: sessionCookie });
       if (updateGitignore) ensureCredentialsIgnored(cwd);
     }
   } else if (action === "mint-from-session") {
     if (!writeCredentials) throw new Error("parle_login mint-from-session refuses writeCredentials=false because it would mint a plaintext token without durable credential recovery.");
     preflightCredentialSink(cwd, updateGitignore);
+    preflightProfileSink(profileName, params.force === true);
     if (!sessionCookie) throw new Error("parle_login mint-from-session requires PARLE_SESSION_COOKIE in env, .env, or .parle/credentials.");
   } else {
     throw new Error(`Unknown parle_login action: ${action}`);
@@ -716,29 +834,31 @@ async function parleLogin(ctx: any, cfg: ParleConfig, params: ParleLoginParams, 
   });
   const token = tokenBody?.token;
   if (!token) throw new Error("Parle token mint succeeded without returning a plaintext token; local credentials were not updated with an agent token.");
+  let profileWrite: { path: string; replaced: boolean } | undefined;
   if (writeCredentials) {
-    writeCredentialFile(cwd, {
-      PARLE_API_BASE: cfg.apiBase.value || DEFAULT_API_BASE,
-      PARLE_WAKE_BASE: cfg.wakeBase.value || undefined,
-      PARLE_AGENT_HANDLE: agent.agent_handle,
-      PARLE_ROOM_HANDLE: room.room_handle,
-      PARLE_ROOM_ID: room.room_id,
-      PARLE_AGENT_ID: agent.agent_id,
-      PARLE_AGENT_TOKEN_ID: tokenBody.agent_token_id,
-      PARLE_SESSION_COOKIE: sessionCookie,
-      PARLE_ROOM_AGENT_TOKEN: token,
-    });
+    writeCredentialFile(cwd, { PARLE_SESSION_COOKIE: sessionCookie });
+    profileWrite = writeProfile({
+      name: profileName,
+      roomId: room.room_id,
+      agentToken: token,
+      agentTokenId: tokenBody.agent_token_id,
+      apiBase: cfg.apiBase.value || DEFAULT_API_BASE,
+      wakeBase: cfg.wakeBase.value || undefined,
+    }, params.force === true);
     if (updateGitignore) ensureCredentialsIgnored(cwd);
   }
   return {
     status: "credentials_saved",
     wroteCredentials: writeCredentials,
+    profile: profileName,
+    profileReplaced: profileWrite?.replaced,
+    profilePath: profileWrite?.path,
     gitignoreUpdated: updateGitignore,
     room: { room_id: room.room_id, room_handle: room.room_handle },
     agent: { agent_id: agent.agent_id, agent_handle: agent.agent_handle },
     agent_token_id: tokenBody.agent_token_id,
     secrets: "redacted; PARLE_SESSION_COOKIE and PARLE_ROOM_AGENT_TOKEN were not returned in tool output",
-    next: "Run parle_status to bootstrap and verify this Pi session.",
+    next: `Set PARLE_PROFILE=${profileName} for this project, remove any direct room-binding configuration, restart Pi, and run parle_status.`,
   };
 }
 
@@ -1487,6 +1607,7 @@ function statusDetails(ctx: any) {
     sessionCookie: redactedValue(cfg.sessionCookie),
     sessionAlias: redactedValue(cfg.sessionAlias),
     watchEnabled: redactedValue(cfg.watchEnabled),
+    profile: redactedValue(cfg.profile),
     warnings: Array.from(new Set(cfg.warnings)),
     runtime: {
       bootstrapped: runtime.bootstrapped,
@@ -1725,7 +1846,7 @@ export default function parleExtension(pi: any) {
         missing,
         howPeersReachYou: details.runtime?.sessionAddress ? `Peers can direct responsive messages to ${details.runtime.sessionAddress}. Share this address when you want this exact session to be reachable.` : undefined,
         peerDiscovery: "Peer addresses are learned from message author blocks on readable room messages. Agents cannot list the full peer roster unless a room-specific API grants that separately.",
-        next: missing.length ? "Use parle_login to request an email code, complete login, capture the session cookie, mint a room-bound agent token, and save .parle/credentials." : "Config is sufficient for lazy runtime bootstrap.",
+        next: missing.length ? "Use parle_login to request an email code, complete login, mint a room-bound agent token, and save it to a named profile in ~/.parle/profiles." : "Config is sufficient for lazy runtime bootstrap.",
       });
     },
   });
@@ -1733,7 +1854,7 @@ export default function parleExtension(pi: any) {
   pi.registerTool({
     name: "parle_login",
     label: "Parle Login",
-    description: "First-class Parle email login and local credential bootstrap. Start sends a code. Complete captures Set-Cookie, lists owned rooms and agents, mints a room-bound agent token, writes .parle/credentials with 0600 permissions, and optionally gitignores that file. Secrets are never returned in tool output.",
+    description: "First-class Parle email login and local credential bootstrap. Complete captures Set-Cookie, mints a room-bound agent token, and atomically writes a named 0600 profile in ~/.parle/profiles. Existing profiles require force=true. Secrets are never returned in tool output.",
     parameters: Type.Object({
       action: Type.Optional(Type.Unsafe({ type: "string", enum: ["start", "complete", "mint-from-session"] })),
       email: Type.Optional(Type.String()),
@@ -1744,6 +1865,8 @@ export default function parleExtension(pi: any) {
       agentHandle: Type.Optional(Type.String()),
       writeCredentials: Type.Optional(Type.Boolean()),
       updateGitignore: Type.Optional(Type.Boolean()),
+      profile: Type.Optional(Type.String({ description: "Safe local profile label. Defaults to default." })),
+      force: Type.Optional(Type.Boolean({ description: "Required to replace an existing profile section." })),
       reason: Type.Optional(Type.String()),
     }),
     async execute(_id, params: ParleLoginParams, signal, _update, ctx) {

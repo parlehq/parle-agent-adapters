@@ -44,6 +44,8 @@ function clearParleEnv() {
 function tempProject(env = "") {
   clearParleEnv();
   const dir = mkdtempSync(join(tmpdir(), "parle-pi-extension-"));
+  process.env.HOME = join(dir, "home");
+  mkdirSync(process.env.HOME, { recursive: true });
   if (env) writeFileSync(join(dir, ".env"), env);
   return dir;
 }
@@ -70,6 +72,28 @@ test("status ignores persisted PARLE_VERSION and warns", async () => {
   assert.equal(status.details.version.source, "default");
   assert.match(status.details.warnings.join("\n"), /Ignoring PARLE_VERSION from project \.env/);
   assert.match(status.details.warnings.join("\n"), /Ignoring stale PARLE_VERSION from project \.parle\/credentials/);
+});
+
+test("status resolves explicit and default profiles with shared atomic-mode semantics", async () => {
+  const cwd = tempProject("PARLE_PROFILE=work\nPARLE_WATCH_ENABLED=0\n");
+  mkdirSync(join(process.env.HOME, ".parle"), { recursive: true });
+  writeFileSync(join(process.env.HOME, ".parle", "profiles"), "[work]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_work\n", { mode: 0o600 });
+  globalThis.fetch = async () => { throw new Error("offline test"); };
+  const status = await installHarness(cwd).call("parle_status");
+  assert.equal(status.details.profile.value, "work");
+  assert.equal(status.details.roomId.source, "profile:work");
+  assert.equal(status.details.agentToken.value, "<redacted>");
+  assert.equal(status.details.apiBase.value, "https://api.parle.sh");
+  assert.equal(status.details.wakeBase.value, "https://api.parle.sh");
+
+  writeFileSync(join(cwd, ".env"), "PARLE_PROFILE=work\nPARLE_ROOM_ID=stale\n");
+  await assert.rejects(installHarness(cwd).call("parle_status"), /PARLE_PROFILE from project_env conflicts with direct configuration/);
+
+  writeFileSync(join(cwd, ".env"), "PARLE_WATCH_ENABLED=0\n");
+  writeFileSync(join(process.env.HOME, ".parle", "profiles"), "[default]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_default\n", { mode: 0o600 });
+  const defaultStatus = await installHarness(cwd).call("parle_status");
+  assert.equal(defaultStatus.details.profile.value, "default");
+  assert.equal(defaultStatus.details.roomId.source, "profile:default");
 });
 
 test("watcher bootstrap failure records status instead of escaping", async () => {
@@ -124,7 +148,7 @@ test("status publishes a display-safe runtime snapshot", async () => {
   assert.equal(snapshot.sessionAddress, "@p.a.raw-session");
   assert.equal(snapshot.roomId, "room-1");
   assert.equal(snapshot.roomHandle, "galexc-intercom");
-  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.5" });
+  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.6" });
   assert.equal(JSON.stringify(snapshot).includes("parle_ses_raw-session"), false);
 });
 
@@ -243,7 +267,7 @@ test("parle_login complete captures Set-Cookie, mints token, saves credentials, 
     }
     if (u.endsWith("/v/rooms")) {
       assert.equal(init.headers.Cookie, "__Host-parle_session=parle_ses_cookie-secret");
-      return new Response(JSON.stringify({ rooms: [{ room_id: "room-1", room_handle: "room-one" }] }), { status: 200 });
+      return new Response(JSON.stringify({ rooms: [{ room_id: "019f2946-aef5-77ad-a41d-747ce0fd6a1e", room_handle: "room-one" }] }), { status: 200 });
     }
     if (u.endsWith("/v/agents")) {
       assert.equal(init.headers.Cookie, "__Host-parle_session=parle_ses_cookie-secret");
@@ -251,8 +275,8 @@ test("parle_login complete captures Set-Cookie, mints token, saves credentials, 
     }
     if (u.endsWith("/v/agents/agent-1/tokens")) {
       assert.equal(init.headers.Cookie, "__Host-parle_session=parle_ses_cookie-secret");
-      assert.deepEqual(JSON.parse(init.body), { room_id: "room-1" });
-      return new Response(JSON.stringify({ agent_token_id: "tok-1", agent_id: "agent-1", room_id: "room-1", token: "parle_agt_plain-secret" }), { status: 201 });
+      assert.deepEqual(JSON.parse(init.body), { room_id: "019f2946-aef5-77ad-a41d-747ce0fd6a1e" });
+      return new Response(JSON.stringify({ agent_token_id: "019f2946-aef5-77ad-a41d-747ce0fd6a1f", agent_id: "agent-1", room_id: "019f2946-aef5-77ad-a41d-747ce0fd6a1e", token: "parle_agt_plain-secret" }), { status: 201 });
     }
     throw new Error("unexpected " + u);
   };
@@ -265,11 +289,17 @@ test("parle_login complete captures Set-Cookie, mints token, saves credentials, 
   assert.equal(JSON.stringify(result.details).includes("parle_agt_plain-secret"), false);
   const credentials = readFileSync(join(cwd, ".parle", "credentials"), "utf8");
   assert.match(credentials, /^PARLE_SESSION_COOKIE=__Host-parle_session=parle_ses_cookie-secret$/m);
-  assert.match(credentials, /^PARLE_ROOM_AGENT_TOKEN=parle_agt_plain-secret$/m);
-  assert.match(credentials, /^PARLE_ROOM_ID=room-1$/m);
-  assert.match(credentials, /^PARLE_AGENT_TOKEN_ID=tok-1$/m);
+  assert.equal(credentials.includes("PARLE_ROOM_AGENT_TOKEN="), false);
+  assert.equal(credentials.includes("PARLE_ROOM_ID="), false);
+  assert.equal(credentials.includes("PARLE_AGENT_TOKEN_ID="), false);
   assert.equal(credentials.includes("PARLE_VERSION="), false);
   assert.match(credentials, /^UNKNOWN_KEEP=keep-me$/m);
+  const profiles = readFileSync(join(process.env.HOME, ".parle", "profiles"), "utf8");
+  assert.match(profiles, /^\[default\]$/m);
+  assert.match(profiles, /^room_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e$/m);
+  assert.match(profiles, /^agent_token = parle_agt_plain-secret$/m);
+  assert.match(profiles, /^agent_token_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1f$/m);
+  assert.equal(statSync(join(process.env.HOME, ".parle", "profiles")).mode & 0o777, 0o600);
   assert.equal(statSync(join(cwd, ".parle", "credentials")).mode & 0o777, 0o600);
   assert.match(readFileSync(join(cwd, ".gitignore"), "utf8"), /^\.parle\/credentials$/m);
 
@@ -277,6 +307,38 @@ test("parle_login complete captures Set-Cookie, mints token, saves credentials, 
   assert.equal(status.details.sessionCookie.value, "<redacted>");
   assert.equal(status.details.agentToken.value, "<redacted>");
   assert.equal(seen.some((request) => request.url.endsWith("/v/agents/agent-1/tokens")), true);
+});
+
+test("parle_login validates labels and requires force before replacing a profile", async () => {
+  const cwd = tempProject("PARLE_SESSION_COOKIE=__Host-parle_session=parle_ses_existing\nPARLE_ROOM_ID=019f2946-aef5-77ad-a41d-747ce0fd6a1e\nPARLE_AGENT_ID=agent-1\n");
+  const catalogDir = join(process.env.HOME, ".parle");
+  mkdirSync(catalogDir, { recursive: true });
+  const original = "# prefix\r\n[keep]\r\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a20\r\nagent_token = parle_agt_keep\r\n[target]\r\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a21\r\nagent_token = parle_agt_old\r\n[tail]\r\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a22\r\nagent_token = parle_agt_tail\r\n";
+  writeFileSync(join(catalogDir, "profiles"), original, { mode: 0o600 });
+  let called = false;
+  globalThis.fetch = async (url, init = {}) => {
+    called = true;
+    const u = String(url);
+    if (u.endsWith("/v/rooms")) return new Response(JSON.stringify({ rooms: [{ room_id: "019f2946-aef5-77ad-a41d-747ce0fd6a1e", room_handle: "one" }] }), { status: 200 });
+    if (u.endsWith("/v/agents")) return new Response(JSON.stringify({ agents: [{ agent_id: "agent-1", agent_handle: "pi" }] }), { status: 200 });
+    if (u.endsWith("/v/agents/agent-1/tokens")) return new Response(JSON.stringify({ agent_token_id: "019f2946-aef5-77ad-a41d-747ce0fd6a1f", token: "parle_agt_new" }), { status: 201 });
+    throw new Error("unexpected " + u + String(init.body || ""));
+  };
+  const harness = installHarness(cwd);
+
+  await assert.rejects(harness.call("parle_login", { action: "mint-from-session", profile: "bad]label", roomId: "019f2946-aef5-77ad-a41d-747ce0fd6a1e", agentId: "agent-1" }), /profile must be/);
+  await assert.rejects(harness.call("parle_login", { action: "mint-from-session", profile: "target", roomId: "019f2946-aef5-77ad-a41d-747ce0fd6a1e", agentId: "agent-1" }), /force=true/);
+  assert.equal(called, false);
+
+  const result = await harness.call("parle_login", { action: "mint-from-session", profile: "target", force: true, roomId: "019f2946-aef5-77ad-a41d-747ce0fd6a1e", agentId: "agent-1" });
+  assert.equal(result.details.profile, "target");
+  assert.equal(result.details.profileReplaced, true);
+  const updated = readFileSync(join(catalogDir, "profiles"), "utf8");
+  const prefix = original.slice(0, original.indexOf("[target]"));
+  const suffix = original.slice(original.indexOf("[tail]"));
+  assert.equal(updated.slice(0, prefix.length), prefix);
+  assert.equal(updated.slice(-suffix.length), suffix);
+  assert.match(updated, /\[target\]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_new\nagent_token_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1f\n/);
 });
 
 test("parle_login preserves session cookie when room or agent selection is ambiguous", async () => {

@@ -20,20 +20,45 @@ The repo-level Pi manifest points at this package's extension entrypoint, so ins
 
 ## Configure
 
-The extension reads configuration from deterministic sources:
+The extension uses the shared client's profile-mode semantics. Set a personal
+profile in process environment or project `.env`:
 
-1. environment variables
-2. project `.env`
-3. project `.parle/credentials`
+```env
+PARLE_PROFILE=my-room
+```
 
-Minimum runtime configuration:
+Profiles live in the UTF-8 INI catalog `~/.parle/profiles`:
+
+```ini
+[my-room]
+room_id = 019f...
+agent_token = parle_agt_...
+agent_token_id = 019f...
+```
+
+An explicit profile is atomic. `PARLE_PROFILE` conflicts with direct
+`PARLE_ROOM_ID`, `PARLE_ROOM_AGENT_TOKEN`, `PARLE_AGENT_TOKEN_ID`,
+`PARLE_ROOM_HANDLE`, `PARLE_API_BASE`, or `PARLE_WAKE_BASE` configuration in
+process environment, project `.env`, or project `.parle/credentials`. Remove the
+direct values rather than mixing them with a profile. If no profile or direct
+binding is set and the catalog exists, `[default]` is selected.
+
+Direct configuration remains supported with precedence of process environment,
+project `.env`, then project `.parle/credentials`:
 
 ```env
 PARLE_ROOM_ID=...
 PARLE_ROOM_AGENT_TOKEN=...
 ```
 
-For a returning account, use `parle_login` instead of raw `parle_request` calls. It sends the email code, captures the `Set-Cookie` header on completion, mints a room-bound agent token, writes `.parle/credentials` with `0600` permissions, and adds `.parle/credentials` to `.gitignore` by default.
+For a returning account, use `parle_login` instead of raw `parle_request` calls.
+It sends the email code, captures the human session cookie in the gitignored
+project `.parle/credentials`, mints a room-bound agent token, and atomically
+writes the selected profile to `~/.parle/profiles` with `0600` permissions.
+`profile` defaults to `default`. Labels are 1 to 64 characters, start with a
+letter or number, and contain only letters, numbers, dot, underscore, or hyphen.
+Replacing an existing section requires `force: true`; unrelated catalog bytes
+are preserved exactly.
 
 Optional configuration:
 
@@ -67,7 +92,7 @@ The extension registers these Pi tools:
 
 - `parle_status` - show redacted config provenance and runtime state.
 - `parle_setup` - diagnose missing configuration.
-- `parle_login` - request and complete email login, capture the human session cookie, mint a room-bound agent token, and save local credentials.
+- `parle_login` - request and complete email login, capture the human session cookie, mint a room-bound agent token, and save a named personal profile. Pass `force: true` only when intentionally replacing that profile.
 - `parle_guidance` - fetch Parle guidance from `ai.parle.sh` or API docs surfaces.
 - `parle_request` - make guarded allowlisted Parle API requests.
 - `parle_read` - read projection rows from the current room.
