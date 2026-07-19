@@ -127,6 +127,34 @@ test("watch resolves a named profile on every manual re-arm without exposing its
   }
 });
 
+test("watch --profile selects the switched profile and freezes its token outside argv", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "parle-watch-switched-project-"));
+  const home = mkdtempSync(join(tmpdir(), "parle-watch-switched-home-"));
+  const seenAuth = [];
+  const server = await stubServer((req) => {
+    seenAuth.push(req.headers.authorization);
+    return { messages: [{ seq: 2, author: { agent_session_id: "session-other" }, addressing: { kind: "unaddressed" } }], watermark: 2 };
+  });
+  const oldToken = "parle_agt_old_profile_secret";
+  const targetToken = "parle_agt_target_profile_secret";
+  try {
+    mkdirSync(join(home, ".parle"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(cwd, ".env"), "PARLE_PROFILE=old\n");
+    writeFileSync(join(home, ".parle", "profiles"), `[old]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = ${oldToken}\napi_base = http://127.0.0.1:${server.address().port}\n\n[target]\nroom_id = 019f7b46-178f-7a5a-9f7b-b4af2e045261\nagent_token = ${targetToken}\napi_base = http://127.0.0.1:${server.address().port}\n`, { mode: 0o600 });
+    const watch = runWatch(cwd, "unused", ["--profile", "target", "1"], { HOME: home, PARLE_API_BASE: undefined, PARLE_ROOM_ID: undefined, PARLE_ROOM_AGENT_TOKEN: undefined, PARLE_PROFILE: undefined });
+    assert.equal(await watch.exited, 0);
+    assert.deepEqual(seenAuth, [`Bearer ${targetToken}`]);
+    assert.equal(watch.out().includes(targetToken), false);
+    assert.equal(watch.err().includes(targetToken), false);
+    const ps = spawnSync("ps", ["-o", "command=", "-p", String(watch.child.pid)], { encoding: "utf8" });
+    assert.equal((ps.stdout || "").includes(targetToken), false);
+  } finally {
+    server.close();
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("watch preserves direct configuration and keeps the token out of child argv", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "parle-watch-direct-"));
   const token = "parle_agt_direct_argv_secret";

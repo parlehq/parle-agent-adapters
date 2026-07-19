@@ -31346,6 +31346,30 @@ var DEFAULT_READ_MESSAGE_LIMIT = 50;
 var READ_LIMIT_BYTES = 256 * 1024;
 var CONNECT_NEXT_GUIDANCE = "Render compactText verbatim to the user as the connection card, then arm responsive delivery before going idle: host watcher if available, otherwise /v/agent/wake SSE followed by responsive-delivery?wait=0 drain and ack. Agent-session expiry ends only this session incarnation: parle_connect uses the still-valid agent token to create a replacement session. Reauthorize only when the agent token is invalid or revoked. Hosts with the parle skill arm the watcher first and add its status line to the card. Do not poll with waitSeconds.";
 var SESSION_ESTABLISHED_NEXT_GUIDANCE = "Report the session address and expiry, then arm responsive delivery before going idle: host watcher if available, otherwise /v/agent/wake SSE followed by responsive-delivery?wait=0 drain and ack. Expiry ends only this session incarnation; parle_connect creates a replacement with the still-valid agent token. Do not poll with waitSeconds.";
+async function performProfileSwitch(plan) {
+  const target = plan.resolve();
+  if (!target.changed) {
+    return { switched: false, profile: target.profile, roomId: target.roomId, reason: "already_active", watcherRestarted: false, warnings: [] };
+  }
+  const prepared = await plan.prepare(target);
+  plan.commit(prepared, target);
+  const warnings = [];
+  try {
+    await plan.retireOldSession();
+  } catch (error51) {
+    warnings.push(`Profile switched, but the prior agent session could not be ended: ${redactString(error51 instanceof Error ? error51.message : String(error51))}`);
+  }
+  let watcherRestarted = false;
+  if (plan.restartWatcher) {
+    try {
+      await plan.restartWatcher(prepared, target);
+      watcherRestarted = true;
+    } catch (error51) {
+      warnings.push(`Profile switched, but watcher restart failed: ${redactString(error51 instanceof Error ? error51.message : String(error51))}`);
+    }
+  }
+  return { switched: true, profile: target.profile, roomId: target.roomId, watcherRestarted, warnings };
+}
 var ParleApiError = class extends Error {
   status;
   code;
@@ -31674,7 +31698,7 @@ function summarizeSendDelivery(details) {
   }
   return void 0;
 }
-var ParleAgentClient = class {
+var ParleAgentClient = class _ParleAgentClient {
   cfg;
   cwd;
   fetchImpl;
@@ -31698,6 +31722,8 @@ var ParleAgentClient = class {
   };
   bootstrapGeneration = 0;
   bootstrapInFlight = null;
+  profileSwitchInFlight = false;
+  activeProfile;
   rebootstrapEpisode = null;
   consecutiveBootstrapFailures = 0;
   unreadInFlight = false;
@@ -31706,6 +31732,7 @@ var ParleAgentClient = class {
     this.env = options.env || process.env;
     this.cwd = options.cwd ?? process.cwd();
     this.cfg = resolveConfig(this.cwd, this.env);
+    this.activeProfile = this.cfg.profile?.value;
     this.fetchImpl = options.fetch || fetch;
     this.now = options.now || (() => /* @__PURE__ */ new Date());
     this.sleepImpl = options.sleep || defaultSleep;
@@ -31729,6 +31756,7 @@ var ParleAgentClient = class {
         version: redactedValue(this.cfg.version),
         roomId: redactedValue(this.cfg.roomId),
         roomHandle: redactedValue(this.cfg.roomHandle),
+        profile: redactedValue(this.cfg.profile),
         agentToken: redactedSecretValue(this.cfg.agentToken),
         agentTokenId: { ...redactedValue(this.cfg.agentTokenId), optional: true }
       },
@@ -31765,9 +31793,12 @@ var ParleAgentClient = class {
       return void 0;
     }
   }
+  selectedEnvironment(profile = this.activeProfile) {
+    return profile ? { ...this.env, PARLE_PROFILE: profile } : this.env;
+  }
   refreshConfigIfAgentTokenChanged() {
     const oldToken = this.cfg.agentToken?.value;
-    const next = resolveConfig(this.cwd, this.env);
+    const next = resolveConfig(this.cwd, this.selectedEnvironment());
     const newToken = next.agentToken?.value;
     if (!oldToken || !newToken || oldToken === newToken)
       return false;
@@ -31892,6 +31923,7 @@ var ParleAgentClient = class {
       this.runtime.roomId = this.cfg.roomId.value;
       const entry = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId.value)}/participants`, { method: "POST", session: true, signal });
       this.runtime.participantId = String(entry.participant_id || "");
+      this.runtime.roomHandle = typeof entry.room_handle === "string" && entry.room_handle ? entry.room_handle : this.cfg.roomHandle?.value;
       this.runtime.bootstrapped = true;
       if (preserveCursor)
         this.runtime.cursor = previousCursor;
@@ -31925,6 +31957,95 @@ var ParleAgentClient = class {
   async ensureBootstrapped(signal) {
     if (!this.runtime.bootstrapped || !this.runtime.sessionHandle)
       await this.bootstrap(signal);
+  }
+  async switchProfile(profile, signal) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(profile)) {
+      throw new Error("Parle profile must be 1 to 64 characters and contain only letters, numbers, dot, underscore, or hyphen, starting with a letter or number.");
+    }
+    if (this.profileSwitchInFlight)
+      throw new Error("A Parle profile switch is already in progress.");
+    this.profileSwitchInFlight = true;
+    try {
+      if (this.bootstrapInFlight)
+        await this.bootstrapInFlight;
+      const previousCfg = this.cfg;
+      const previousRuntime = { ...this.runtime };
+      const previousProfile = this.activeProfile;
+      let targetCfg;
+      const result = await performProfileSwitch({
+        resolve: () => {
+          targetCfg = resolveConfig(this.cwd, this.selectedEnvironment(profile));
+          if (!targetCfg.roomId?.value || !targetCfg.agentToken?.value) {
+            throw new Error(`Parle profile ${profile} does not provide a complete room binding.`);
+          }
+          if (previousCfg.sessionAlias?.value || targetCfg.sessionAlias?.value) {
+            throw new Error("Live profile switching is unavailable while PARLE_SESSION_ALIAS is configured because scratch preparation must not supersede the active named route. Restart the host with the target profile instead.");
+          }
+          const sameBinding = previousCfg.roomId?.value === targetCfg.roomId.value && previousCfg.agentToken?.value === targetCfg.agentToken.value && previousCfg.apiBase.value === targetCfg.apiBase.value && previousCfg.wakeBase.value === targetCfg.wakeBase.value;
+          return { profile, roomId: targetCfg.roomId.value, changed: previousProfile !== profile || !sameBinding || !this.runtime.bootstrapped };
+        },
+        prepare: async () => {
+          const prepared = new _ParleAgentClient({
+            cwd: this.cwd,
+            env: this.selectedEnvironment(profile),
+            fetch: this.fetchImpl,
+            now: this.now,
+            sleep: this.sleepImpl,
+            randomUUID: this.randomUUID,
+            clientName: this.clientName,
+            clientVersion: this.clientVersion
+          });
+          try {
+            await prepared.bootstrap(signal, false);
+          } catch (error51) {
+            await prepared.endSession().catch(() => void 0);
+            throw error51;
+          }
+          return prepared;
+        },
+        commit: (prepared) => {
+          this.stopUnreadPolling();
+          this.cfg = prepared.cfg;
+          this.activeProfile = profile;
+          this.runtime = { ...prepared.runtime };
+          this.bootstrapGeneration += 1;
+          this.rebootstrapEpisode = null;
+          this.consecutiveBootstrapFailures = 0;
+          this.publishRuntimeState();
+          this.scheduleUnreadPoll();
+        },
+        retireOldSession: async () => {
+          if (!previousRuntime.agentSessionId || !previousRuntime.sessionHandle)
+            return;
+          const prior = new _ParleAgentClient({
+            cwd: this.cwd,
+            env: this.env,
+            fetch: this.fetchImpl,
+            now: this.now,
+            sleep: this.sleepImpl,
+            randomUUID: this.randomUUID,
+            clientName: this.clientName,
+            clientVersion: this.clientVersion
+          });
+          prior.cfg = previousCfg;
+          prior.runtime = previousRuntime;
+          await prior.endSession(signal);
+        }
+      });
+      return {
+        ...result,
+        previousProfile,
+        roomHandle: this.runtime.roomHandle,
+        sessionAddress: this.runtime.sessionAddress,
+        agentSessionId: this.runtime.agentSessionId,
+        participantId: this.runtime.participantId,
+        expiresAt: this.runtime.expiresAt,
+        cursor: this.runtime.cursor,
+        watcherRestartRequired: result.switched
+      };
+    } finally {
+      this.profileSwitchInFlight = false;
+    }
   }
   sessionExpired() {
     const expiry = this.runtime.expiresAt ? new Date(this.runtime.expiresAt) : null;
@@ -31968,7 +32089,7 @@ var ParleAgentClient = class {
         // (parlehq/parle#435); session_credential never leaves process memory.
         agentSessionId: this.runtime.agentSessionId,
         roomId: this.runtime.roomId || this.cfg.roomId?.value || "",
-        roomHandle: this.cfg.roomHandle?.value,
+        roomHandle: this.runtime.roomHandle || this.cfg.roomHandle?.value,
         updatedAt: this.now().toISOString(),
         expiresAt: this.runtime.expiresAt,
         ...this.runtime.lastBootstrapError ? { lastError: this.runtime.lastBootstrapError } : {},
@@ -32077,6 +32198,7 @@ var ParleAgentClient = class {
         expiresAt: "",
         participantId: "",
         roomId: "",
+        roomHandle: void 0,
         cursor: 0
       };
       this.discardRuntimeFile();
@@ -32091,7 +32213,7 @@ var ParleAgentClient = class {
       connected: this.runtime.bootstrapped,
       reusedExistingSession,
       roomId: this.runtime.roomId,
-      roomHandle: this.cfg.roomHandle?.value,
+      roomHandle: this.runtime.roomHandle || this.cfg.roomHandle?.value,
       sessionAddress: this.runtime.sessionAddress,
       agentSessionId: this.runtime.agentSessionId,
       participantId: this.runtime.participantId,
@@ -32236,8 +32358,12 @@ var sendSchema = {
 var statusSchema = {
   inspect: external_exports.boolean().optional()
 };
+var switchProfileSchema = {
+  profile: external_exports.string(),
+  watcherStopped: external_exports.boolean()
+};
 function createParleMcpServer(client = new ParleAgentClient()) {
-  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.0" });
+  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.8" });
   server.registerTool("parle_status", {
     title: "Parle Status",
     description: "Show redacted Parle config provenance and runtime state. The result's compactText is the standard card for user-facing status: render it verbatim instead of paraphrasing; config and runtime are diagnostic detail. When configured and not yet connected, this auto-connects the session first (single-flight, backoff-aware); pass inspect:true for a passive read with no network side effects.",
@@ -32266,6 +32392,28 @@ function createParleMcpServer(client = new ParleAgentClient()) {
     const summary = await client.connect();
     if (summary && typeof summary === "object") return { ...summary, compactText: compactConnectionCardFromSummary(summary) };
     return summary;
+  }));
+  server.registerTool("parle_switch_profile", {
+    title: "Switch Parle Profile",
+    description: "Switch this MCP process to another named Parle profile after the host has stopped its sibling responsive watcher. This is ephemeral and never edits environment or profile files. watcherStopped=true is a required host attestation because MCP cannot inspect Claude Code background Bash tasks. On success, restart the bundled watcher with the returned profile, cursor, and agentSessionId.",
+    inputSchema: switchProfileSchema,
+    annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: true }
+  }, async (params) => safeTool(async () => {
+    if (params.watcherStopped !== true) throw new Error("parle_switch_profile requires watcherStopped=true after the host has verified the sibling watcher task is stopped.");
+    if (typeof client.switchProfile !== "function") throw new Error("This Parle client does not support live profile switching.");
+    const result = await client.switchProfile(params.profile);
+    if (!result || typeof result !== "object") return result;
+    const details = result;
+    return {
+      ...details,
+      watcher: details.switched ? {
+        restartRequired: true,
+        profile: details.profile,
+        cursor: details.cursor,
+        agentSessionId: details.agentSessionId,
+        launcherArgs: ["--profile", details.profile, String(details.cursor), details.agentSessionId]
+      } : { restartRequired: false }
+    };
   }));
   server.registerTool("parle_guidance", {
     title: "Parle Guidance",
@@ -32299,7 +32447,7 @@ function createParleMcpServer(client = new ParleAgentClient()) {
   return server;
 }
 async function runStdio() {
-  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.5" } });
+  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.8" } });
   const server = createParleMcpServer(client);
   installLifecycleHandlers(client);
   await server.connect(new StdioServerTransport());
@@ -32341,15 +32489,16 @@ async function safeTool(fn) {
 function isDirectRun(metaUrl, argvPath = process.argv[1]) {
   return Boolean(argvPath) && metaUrl === pathToFileURL(argvPath).href;
 }
-function resolveWatcherEnvironment(cwd = process.cwd(), env = process.env, onWarning) {
-  const config2 = resolveConfig(cwd, env);
+function resolveWatcherEnvironment(cwd = process.cwd(), env = process.env, onWarning, profile) {
+  const selectedEnv = profile ? { ...env, PARLE_PROFILE: profile } : env;
+  const config2 = resolveConfig(cwd, selectedEnv);
   for (const warning of config2.warnings) onWarning?.(redactString(warning));
   const roomId = config2.roomId?.value;
   const agentToken = config2.agentToken?.value;
   if (!roomId || !agentToken) {
     throw new Error("required host configuration is missing. Set PARLE_PROFILE (profile catalog; PARLE_PROFILES_PATH relocates it) or PARLE_ROOM_ID / PARLE_ROOM_AGENT_TOKEN in env or ./.env (run from the project directory)");
   }
-  const childEnv = { ...env };
+  const childEnv = { ...selectedEnv };
   delete childEnv.PARLE_PROFILE;
   delete childEnv.PARLE_PROFILES_PATH;
   return {
@@ -32364,10 +32513,17 @@ function resolveWatcherEnvironment(cwd = process.cwd(), env = process.env, onWar
 async function runWatcher(metaUrl, args, cwd = process.cwd(), env = process.env) {
   const worker = join4(dirname2(fileURLToPath(metaUrl)), "..", "skills", "parle", "scripts", "parle-watch-worker.sh");
   if (!existsSync3(worker)) throw new Error("bundled watcher worker is missing; reinstall or rebuild the Claude plugin");
-  const childEnv = resolveWatcherEnvironment(cwd, env, (warning) => console.error(`Parle warning: ${warning}`));
+  let profile;
+  let workerArgs = args;
+  if (args[0] === "--profile") {
+    profile = args[1];
+    if (!profile) throw new Error("--profile requires a named profile");
+    workerArgs = args.slice(2);
+  }
+  const childEnv = resolveWatcherEnvironment(cwd, env, (warning) => console.error(`Parle warning: ${warning}`), profile);
   childEnv.PARLE_WATCH_REQUEST_HELPER = fileURLToPath(metaUrl);
   childEnv.PARLE_WATCH_PARENT_PID = String(process.pid);
-  const child = spawn("sh", [worker, ...args], { cwd, env: childEnv, stdio: "inherit" });
+  const child = spawn("sh", [worker, ...workerArgs], { cwd, env: childEnv, stdio: "inherit" });
   const forward = (signal) => child.kill(signal);
   process.once("SIGINT", forward);
   process.once("SIGTERM", forward);

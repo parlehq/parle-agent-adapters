@@ -292,7 +292,7 @@ function summarizeSendDelivery(details) {
 // src/index.ts
 import { Type } from "typebox";
 var EXTENSION_ID = "25-parle";
-var PI_EXTENSION_VERSION = "0.1.21";
+var PI_EXTENSION_VERSION = "0.1.22";
 var RUNTIME_SCHEMA_VERSION2 = 1;
 var AI_GUIDANCE_URL = "https://ai.parle.sh";
 var API_LLMS_URL = "https://api.parle.sh/llms.txt";
@@ -1235,6 +1235,9 @@ async function switchProfile(pi, ctx, profile, signal) {
     resolve() {
       const cfg = resolveConfig(cwd, profile);
       assertRuntimeConfig(cfg);
+      if (runtime.sessionAlias || previousCfg.sessionAlias?.value || cfg.sessionAlias?.value) {
+        throw new Error("Live profile switching is unavailable while PARLE_SESSION_ALIAS is configured because scratch preparation must not supersede the active named route. Restart Pi with the target profile instead.");
+      }
       const sameProfile = previousProfile === profile;
       const sameBinding = sameRoomBinding(previousCfg, cfg);
       const changed = !sameProfile || !sameBinding || !runtime.bootstrapped;

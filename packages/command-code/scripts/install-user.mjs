@@ -69,6 +69,6 @@ if (!existingServer) {
   }
 }
 
-writeFileSync(resolve(home, ".local/share/parle/command-code/INSTALLATION"), "Managed by @parlehq/command-code-adapter 0.1.0\n", { mode: 0o600 });
+writeFileSync(resolve(home, ".local/share/parle/command-code/INSTALLATION"), "Managed by @parlehq/command-code-adapter 0.1.1\n", { mode: 0o600 });
 console.log("Installed Parle for Command Code at user scope.");
 console.log("Restart Command Code, then run /mcp or cmd mcp get parle to verify.");

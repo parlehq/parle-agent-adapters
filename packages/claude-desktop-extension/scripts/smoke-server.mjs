@@ -26,6 +26,7 @@ try {
     "parle_send",
     "parle_setup",
     "parle_status",
+    "parle_switch_profile",
   ]);
   const setup = await client.callTool({ name: "parle_setup", arguments: {} });
   assert.equal(setup.structuredContent.ok, false);

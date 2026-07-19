@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.12 (2026-07-19)
+
+Bundled MCP refresh for canonical room-handle capture and ephemeral named-profile switching. Desktop has no sibling watcher, so callers may attest `watcherStopped: true` directly.
+
 ## 0.5.10 (2026-07-11)
 
 Bundled MCP refresh clarifying agent-session expiry recovery.

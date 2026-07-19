@@ -6,8 +6,10 @@
 // script never writes, prunes, or connects.
 //
 // Display contract (cwd-scoped, NOT Claude-session-authoritative):
-//   exactly one live session  ->  "parle ✓ @principal.agent.session"
-//   multiple live sessions    ->  "parle ✓ N sessions" (never a specific
+//   exactly one live session  ->  "#room-handle ✓ @principal.agent.session"
+//   multiple live sessions    ->  "#room-handle ✓ N sessions" when every
+//                                 session is in that room, otherwise
+//                                 "parle ✓ N sessions" (never a specific
 //                                 address presented as yours: it could be a
 //                                 sibling session's)
 //   none live but configured  ->  "parle · off"
@@ -61,18 +63,18 @@ function main() {
   }
   if (live.length === 1) {
     const s = live[0];
-    const address = s.sessionAddress || s.roomHandle || "connected";
+    const label = roomLabel(s);
+    const address = s.sessionAddress || "connected";
     const unread = unreadInfo(s, now);
     if (FULL) {
-      const parts = [`parle ✓ ${address}`];
-      if (s.roomHandle && s.sessionAddress) parts.push(s.roomHandle);
+      const parts = [`${label} ✓ ${address}`];
       const expiry = relativeExpiry(Date.parse(s.expiresAt || ""), now);
       if (expiry) parts.push(`expires ${expiry}`);
       if (unread?.fresh) parts.push(`${unread.count} unread`);
       else if (unread) parts.push(`unread stale ${Math.round(unread.ageMs / 60_000)}m`);
       process.stdout.write(parts.join(" · "));
     } else {
-      process.stdout.write(`parle ✓ ${address}${unread?.fresh ? ` · ${unread.count} unread` : ""}`);
+      process.stdout.write(`${label} ✓ ${address}${unread?.fresh ? ` · ${unread.count} unread` : ""}`);
     }
     return;
   }
@@ -80,18 +82,26 @@ function main() {
     // Per-session self-excluding surfaces double-count room-wide rows, so
     // multi-session display never sums and compact shows an indicator only.
     const anyUnread = live.some((s) => unreadInfo(s, now)?.fresh);
+    const labels = new Set(live.map(roomLabel));
+    const sharedLabel = labels.size === 1 ? labels.values().next().value : "parle";
     if (FULL) {
       const addresses = live.map((s) => {
         const unread = unreadInfo(s, now);
-        return `${s.sessionAddress || "connected"}${unread?.fresh ? ` (${unread.count} unread)` : ""}`;
+        return `${roomLabel(s)} ${s.sessionAddress || "connected"}${unread?.fresh ? ` (${unread.count} unread)` : ""}`;
       }).join("  ");
-      process.stdout.write(`parle ✓ ${live.length} sessions in cwd: ${addresses}`);
+      process.stdout.write(`${sharedLabel} ✓ ${live.length} sessions in cwd: ${addresses}`);
     } else {
-      process.stdout.write(`parle ✓ ${live.length} sessions${anyUnread ? " · unread" : ""}`);
+      process.stdout.write(`${sharedLabel} ✓ ${live.length} sessions${anyUnread ? " · unread" : ""}`);
     }
     return;
   }
   if (parleConfiguredHint(cwd)) process.stdout.write("parle · off");
+}
+
+function roomLabel(snapshot) {
+  if (typeof snapshot?.roomHandle === "string" && snapshot.roomHandle) return `#${snapshot.roomHandle}`;
+  if (typeof snapshot?.roomId === "string" && snapshot.roomId) return `#room-${snapshot.roomId.slice(0, 8)}`;
+  return "parle";
 }
 
 // "Configured but disconnected" heuristic: the project .env names a Parle

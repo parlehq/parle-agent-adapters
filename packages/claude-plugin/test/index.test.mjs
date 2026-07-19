@@ -27,6 +27,9 @@ test("Claude plugin includes skill guidance and copied MCP artifact", () => {
   assert.match(skill, /Session Address:/);
   assert.match(skill, /Watcher       on/);
   assert.match(skill, /Do not report UUIDs, cursor, expiry, backlog, or config provenance/);
+  assert.match(skill, /parle_switch_profile/);
+  assert.match(skill, /watcherStopped: true/);
+  assert.match(skill, /--profile <profile>/);
 
   const artifact = resolve(root, "dist/parle-mcp.js");
   assert.equal(existsSync(artifact), true);

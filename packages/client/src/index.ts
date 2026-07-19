@@ -62,6 +62,7 @@ export type RuntimeState = {
   expiresAt: string;
   participantId: string;
   roomId: string;
+  roomHandle?: string;
   cursor: number;
   lastHeartbeatAt?: string;
   lastHttpStatus?: number;
@@ -157,6 +158,17 @@ export type ProfileSwitchResult = {
   reason?: "already_active";
   watcherRestarted: boolean;
   warnings: string[];
+};
+
+export type ClientProfileSwitchResult = ProfileSwitchResult & {
+  previousProfile?: string;
+  roomHandle?: string;
+  sessionAddress: string | null;
+  agentSessionId: string;
+  participantId: string;
+  expiresAt: string;
+  cursor: number;
+  watcherRestartRequired: boolean;
 };
 
 // Profile switching is local adapter lifecycle, not Parle wire meaning. L1 owns
@@ -619,6 +631,8 @@ export class ParleAgentClient {
   };
   private bootstrapGeneration = 0;
   private bootstrapInFlight: Promise<RuntimeState> | null = null;
+  private profileSwitchInFlight = false;
+  private activeProfile?: string;
   private rebootstrapEpisode: { failedSessionHandle: string; attempted: boolean; healthySinceMs?: number; terminal?: boolean } | null = null;
   private consecutiveBootstrapFailures = 0;
   private unreadInFlight = false;
@@ -628,6 +642,7 @@ export class ParleAgentClient {
     this.env = options.env || process.env;
     this.cwd = options.cwd ?? process.cwd();
     this.cfg = resolveConfig(this.cwd, this.env);
+    this.activeProfile = this.cfg.profile?.value;
     this.fetchImpl = options.fetch || fetch;
     this.now = options.now || (() => new Date());
     this.sleepImpl = options.sleep || defaultSleep;
@@ -653,6 +668,7 @@ export class ParleAgentClient {
         version: redactedValue(this.cfg.version),
         roomId: redactedValue(this.cfg.roomId),
         roomHandle: redactedValue(this.cfg.roomHandle),
+        profile: redactedValue(this.cfg.profile),
         agentToken: redactedSecretValue(this.cfg.agentToken),
         agentTokenId: { ...redactedValue(this.cfg.agentTokenId), optional: true },
       },
@@ -693,9 +709,13 @@ export class ParleAgentClient {
     }
   }
 
+  private selectedEnvironment(profile = this.activeProfile): Record<string, string | undefined> {
+    return profile ? { ...this.env, PARLE_PROFILE: profile } : this.env;
+  }
+
   private refreshConfigIfAgentTokenChanged(): boolean {
     const oldToken = this.cfg.agentToken?.value;
-    const next = resolveConfig(this.cwd, this.env);
+    const next = resolveConfig(this.cwd, this.selectedEnvironment());
     const newToken = next.agentToken?.value;
     if (!oldToken || !newToken || oldToken === newToken) return false;
     this.cfg = next;
@@ -816,6 +836,7 @@ export class ParleAgentClient {
       this.runtime.roomId = this.cfg.roomId!.value!;
       const entry = await this.requestJson(`/v/rooms/${encodeURIComponent(this.cfg.roomId!.value!)}/participants`, { method: "POST", session: true, signal });
       this.runtime.participantId = String(entry.participant_id || "");
+      this.runtime.roomHandle = typeof entry.room_handle === "string" && entry.room_handle ? entry.room_handle : this.cfg.roomHandle?.value;
       this.runtime.bootstrapped = true;
       if (preserveCursor) this.runtime.cursor = previousCursor;
       else {
@@ -847,6 +868,102 @@ export class ParleAgentClient {
 
   async ensureBootstrapped(signal?: AbortSignal) {
     if (!this.runtime.bootstrapped || !this.runtime.sessionHandle) await this.bootstrap(signal);
+  }
+
+  async switchProfile(profile: string, signal?: AbortSignal): Promise<ClientProfileSwitchResult> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(profile)) {
+      throw new Error("Parle profile must be 1 to 64 characters and contain only letters, numbers, dot, underscore, or hyphen, starting with a letter or number.");
+    }
+    if (this.profileSwitchInFlight) throw new Error("A Parle profile switch is already in progress.");
+    this.profileSwitchInFlight = true;
+    try {
+      if (this.bootstrapInFlight) await this.bootstrapInFlight;
+      const previousCfg = this.cfg;
+      const previousRuntime = { ...this.runtime };
+      const previousProfile = this.activeProfile;
+      let targetCfg: ParleConfig | undefined;
+
+      const result = await performProfileSwitch({
+        resolve: () => {
+          targetCfg = resolveConfig(this.cwd, this.selectedEnvironment(profile));
+          if (!targetCfg.roomId?.value || !targetCfg.agentToken?.value) {
+            throw new Error(`Parle profile ${profile} does not provide a complete room binding.`);
+          }
+          if (previousCfg.sessionAlias?.value || targetCfg.sessionAlias?.value) {
+            throw new Error("Live profile switching is unavailable while PARLE_SESSION_ALIAS is configured because scratch preparation must not supersede the active named route. Restart the host with the target profile instead.");
+          }
+          const sameBinding = previousCfg.roomId?.value === targetCfg.roomId.value
+            && previousCfg.agentToken?.value === targetCfg.agentToken.value
+            && previousCfg.apiBase.value === targetCfg.apiBase.value
+            && previousCfg.wakeBase.value === targetCfg.wakeBase.value;
+          return { profile, roomId: targetCfg.roomId.value, changed: previousProfile !== profile || !sameBinding || !this.runtime.bootstrapped };
+        },
+        prepare: async () => {
+          // Deliberately omit publishRuntime: scratch cleanup must never write
+          // or delete the live client's cwd+pid runtime snapshot.
+          const prepared = new ParleAgentClient({
+            cwd: this.cwd,
+            env: this.selectedEnvironment(profile),
+            fetch: this.fetchImpl,
+            now: this.now,
+            sleep: this.sleepImpl,
+            randomUUID: this.randomUUID,
+            clientName: this.clientName,
+            clientVersion: this.clientVersion,
+          });
+          try {
+            await prepared.bootstrap(signal, false);
+          } catch (error) {
+            await prepared.endSession().catch(() => undefined);
+            throw error;
+          }
+          return prepared;
+        },
+        commit: (prepared) => {
+          this.stopUnreadPolling();
+          this.cfg = prepared.cfg;
+          this.activeProfile = profile;
+          this.runtime = { ...prepared.runtime };
+          this.bootstrapGeneration += 1;
+          this.rebootstrapEpisode = null;
+          this.consecutiveBootstrapFailures = 0;
+          this.publishRuntimeState();
+          this.scheduleUnreadPoll();
+        },
+        retireOldSession: async () => {
+          if (!previousRuntime.agentSessionId || !previousRuntime.sessionHandle) return;
+          // Deliberately omit publishRuntime: retiring the captured old session
+          // must not delete the newly adopted live runtime snapshot.
+          const prior = new ParleAgentClient({
+            cwd: this.cwd,
+            env: this.env,
+            fetch: this.fetchImpl,
+            now: this.now,
+            sleep: this.sleepImpl,
+            randomUUID: this.randomUUID,
+            clientName: this.clientName,
+            clientVersion: this.clientVersion,
+          });
+          prior.cfg = previousCfg;
+          prior.runtime = previousRuntime;
+          await prior.endSession(signal);
+        },
+      });
+
+      return {
+        ...result,
+        previousProfile,
+        roomHandle: this.runtime.roomHandle,
+        sessionAddress: this.runtime.sessionAddress,
+        agentSessionId: this.runtime.agentSessionId,
+        participantId: this.runtime.participantId,
+        expiresAt: this.runtime.expiresAt,
+        cursor: this.runtime.cursor,
+        watcherRestartRequired: result.switched,
+      };
+    } finally {
+      this.profileSwitchInFlight = false;
+    }
   }
 
   private sessionExpired(): boolean {
@@ -891,7 +1008,7 @@ export class ParleAgentClient {
         // (parlehq/parle#435); session_credential never leaves process memory.
         agentSessionId: this.runtime.agentSessionId,
         roomId: this.runtime.roomId || this.cfg.roomId?.value || "",
-        roomHandle: this.cfg.roomHandle?.value,
+        roomHandle: this.runtime.roomHandle || this.cfg.roomHandle?.value,
         updatedAt: this.now().toISOString(),
         expiresAt: this.runtime.expiresAt,
         ...(this.runtime.lastBootstrapError ? { lastError: this.runtime.lastBootstrapError } : {}),
@@ -1000,6 +1117,7 @@ export class ParleAgentClient {
         expiresAt: "",
         participantId: "",
         roomId: "",
+        roomHandle: undefined,
         cursor: 0,
       };
       this.discardRuntimeFile();
@@ -1015,7 +1133,7 @@ export class ParleAgentClient {
       connected: this.runtime.bootstrapped,
       reusedExistingSession,
       roomId: this.runtime.roomId,
-      roomHandle: this.cfg.roomHandle?.value,
+      roomHandle: this.runtime.roomHandle || this.cfg.roomHandle?.value,
       sessionAddress: this.runtime.sessionAddress,
       agentSessionId: this.runtime.agentSessionId,
       participantId: this.runtime.participantId,

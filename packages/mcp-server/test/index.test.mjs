@@ -19,6 +19,7 @@ const expectedTools = [
   "parle_send",
   "parle_setup",
   "parle_status",
+  "parle_switch_profile",
 ];
 
 test("direct-run detection handles URL-encoded paths", () => {
@@ -37,6 +38,10 @@ test("watch launcher uses shared profile resolution and preserves direct config"
     assert.equal(profile.PARLE_ROOM_AGENT_TOKEN, "parle_agt_watch_secret");
     assert.equal(profile.PARLE_API_BASE, "https://profile.example");
     assert.equal(profile.SAFE_KEEP, "yes");
+    assert.equal(profile.PARLE_PROFILE, undefined);
+    const explicitProfile = resolveWatcherEnvironment(cwd, { HOME: home, PARLE_PROFILE: "stale-selector" }, undefined, "watch");
+    assert.equal(explicitProfile.PARLE_ROOM_AGENT_TOKEN, "parle_agt_watch_secret");
+    assert.equal(explicitProfile.PARLE_PROFILE, undefined);
     assert.throws(
       () => resolveWatcherEnvironment(cwd, { HOME: home, PARLE_PROFILE: "watch", PARLE_ROOM_ID: "stale-direct" }),
       /conflicts with direct configuration/,
@@ -67,6 +72,7 @@ test("in-memory server maps read, send, and errors through fake client", async (
     readInbox: async () => ({ messages: [] }),
     affordances: async () => ({ affordances: [] }),
     send: async (params) => { calls.push(["send", params]); return { event_id: "evt-1", idempotencyKey: params.idempotencyKey, deliveryStatus: { state: "accepted_scan_skipped", message: "Message accepted. This room/config skipped moderation scanning, so do not describe it as awaiting moderation completion." } }; },
+    switchProfile: async (profile) => { calls.push(["switch", profile]); return { switched: true, profile, cursor: 42, agentSessionId: "as-target", roomHandle: "target-room" }; },
   };
   const server = createParleMcpServer(fakeClient);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -83,7 +89,13 @@ test("in-memory server maps read, send, and errors through fake client", async (
     const send = await client.callTool({ name: "parle_send", arguments: { body: "hello", to: "@p.a.s1", idempotencyKey: "idem-1" } });
     assert.equal(send.structuredContent.idempotencyKey, "idem-1");
     assert.equal(send.structuredContent.deliveryStatus.state, "accepted_scan_skipped");
-    assert.deepEqual(calls, [["connect"], ["read", { waitSeconds: 1 }], ["send", { body: "hello", to: "@p.a.s1", idempotencyKey: "idem-1" }]]);
+    const refused = await client.callTool({ name: "parle_switch_profile", arguments: { profile: "target", watcherStopped: false } });
+    assert.equal(refused.isError, true);
+    assert.match(refused.structuredContent.error, /watcherStopped=true/);
+    const switched = await client.callTool({ name: "parle_switch_profile", arguments: { profile: "target", watcherStopped: true } });
+    assert.equal(switched.structuredContent.roomHandle, "target-room");
+    assert.deepEqual(switched.structuredContent.watcher.launcherArgs, ["--profile", "target", "42", "as-target"]);
+    assert.deepEqual(calls, [["connect"], ["read", { waitSeconds: 1 }], ["send", { body: "hello", to: "@p.a.s1", idempotencyKey: "idem-1" }], ["switch", "target"]]);
   } finally {
     await client.close();
     await server.close();
@@ -261,7 +273,7 @@ test("parle_status works against minimal fake clients without lifecycle methods"
   }
 });
 
-test("stdio server lists the eight v1 tools and setup works without secrets", async () => {
+test("stdio server lists the nine v1 tools and setup works without secrets", async () => {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [new URL("../dist/parle-mcp.js", import.meta.url).pathname],

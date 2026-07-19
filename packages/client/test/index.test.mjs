@@ -893,6 +893,103 @@ test("profile selects an atomic room binding from the personal catalog", () => {
   }
 });
 
+test("client profile switch prepares a scratch session, adopts room identity, and retires the old session", async () => {
+  const home = mkdtempSync(join(tmpdir(), "parle-profile-switch-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "parle-profile-switch-project-"));
+  try {
+    mkdirSync(join(home, ".parle"), { mode: 0o700 });
+    writeFileSync(join(home, ".parle", "profiles"), "[default]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_old\n\n[target]\nroom_id = 019f7b46-178f-7a5a-9f7b-b4af2e045261\nagent_token = parle_agt_target\n", { mode: 0o600 });
+    const calls = [];
+    const fetch = async (url, init = {}) => {
+      const path = new URL(String(url)).pathname;
+      const auth = init.headers?.Authorization;
+      if (path === "/v/agent/sessions") {
+        calls.push(["session", auth]);
+        const target = auth === "Bearer parle_agt_target";
+        return json({ agent_session_id: target ? "as-target" : "as-old", session_credential: target ? "parle_ses_target" : "parle_ses_old", expires_at: "2099-01-01T00:00:00Z", address: target ? "@p.a.target" : "@p.a.old" }, 201);
+      }
+      if (path.endsWith("/participants")) {
+        const target = path.includes("019f7b46-178f-7a5a-9f7b-b4af2e045261");
+        return json({ participant_id: target ? "part-target" : "part-old", room_handle: target ? "target-room" : "old-room" }, 201);
+      }
+      if (path.endsWith("/projection")) return json({ watermark: path.includes("019f7b46-178f-7a5a-9f7b-b4af2e045261") ? 42 : 7, messages: [] });
+      if (path === "/v/agent/sessions/as-old/end") {
+        calls.push(["end-old", auth, init.headers?.["Parle-Agent-Session"]]);
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected ${path}`);
+    };
+    const client = new ParleAgentClient({ cwd, env: { HOME: home, PARLE_PROFILE: "default" }, fetch });
+    await client.connect();
+    const result = await client.switchProfile("target");
+    assert.equal(result.switched, true);
+    assert.equal(result.previousProfile, "default");
+    assert.equal(result.roomId, "019f7b46-178f-7a5a-9f7b-b4af2e045261");
+    assert.equal(result.roomHandle, "target-room");
+    assert.equal(result.cursor, 42);
+    assert.equal(result.watcherRestartRequired, true);
+    assert.equal(result.watcherRestarted, false);
+    assert.equal(client.status().config.profile.value, "target");
+    assert.equal(client.status().runtime.roomHandle, "target-room");
+    assert.deepEqual(calls.at(-1), ["end-old", "Bearer parle_agt_old", "parle_ses_old"]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("client profile switch refuses configured named-route aliases before scratch bootstrap", async () => {
+  const home = mkdtempSync(join(tmpdir(), "parle-profile-alias-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "parle-profile-alias-project-"));
+  try {
+    mkdirSync(join(home, ".parle"), { mode: 0o700 });
+    writeFileSync(join(home, ".parle", "profiles"), "[default]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_old\n\n[target]\nroom_id = 019f7b46-178f-7a5a-9f7b-b4af2e045261\nagent_token = parle_agt_target\n", { mode: 0o600 });
+    let called = false;
+    const client = new ParleAgentClient({ cwd, env: { HOME: home, PARLE_PROFILE: "default", PARLE_SESSION_ALIAS: "main" }, fetch: async () => { called = true; return json({}); } });
+    await assert.rejects(client.switchProfile("target"), /PARLE_SESSION_ALIAS/);
+    assert.equal(called, false);
+    assert.equal(client.status().config.profile.value, "default");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("client profile switch failure leaves the old profile session intact", async () => {
+  const home = mkdtempSync(join(tmpdir(), "parle-profile-fail-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "parle-profile-fail-project-"));
+  try {
+    mkdirSync(join(home, ".parle"), { mode: 0o700 });
+    writeFileSync(join(home, ".parle", "profiles"), "[default]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_old\n\n[bad]\nroom_id = 019f7b46-178f-7a5a-9f7b-b4af2e045262\nagent_token = parle_agt_bad\n", { mode: 0o600 });
+    let oldEnded = false;
+    const fetch = async (url, init = {}) => {
+      const path = new URL(String(url)).pathname;
+      const auth = init.headers?.Authorization;
+      if (path === "/v/agent/sessions") {
+        const bad = auth === "Bearer parle_agt_bad";
+        return json({ agent_session_id: bad ? "as-bad" : "as-old", session_credential: bad ? "parle_ses_bad" : "parle_ses_old", expires_at: "2099-01-01T00:00:00Z", address: bad ? "@p.a.bad" : "@p.a.old" }, 201);
+      }
+      if (path === "/v/rooms/019f2946-aef5-77ad-a41d-747ce0fd6a1e/participants") return json({ participant_id: "part-old", room_handle: "old-room" }, 201);
+      if (path === "/v/rooms/019f7b46-178f-7a5a-9f7b-b4af2e045262/participants") return json({ error: { message: "not admitted" } }, 404);
+      if (path === "/v/rooms/019f2946-aef5-77ad-a41d-747ce0fd6a1e/projection") return json({ watermark: 7, messages: [] });
+      if (path === "/v/agent/sessions/as-bad/end") return new Response(null, { status: 204 });
+      if (path === "/v/agent/sessions/as-old/end") { oldEnded = true; return new Response(null, { status: 204 }); }
+      throw new Error(`unexpected ${path}`);
+    };
+    const client = new ParleAgentClient({ cwd, env: { HOME: home, PARLE_PROFILE: "default" }, fetch });
+    await client.connect();
+    await assert.rejects(client.switchProfile("bad"), /not admitted/);
+    assert.equal(oldEnded, false);
+    assert.equal(client.status().config.profile.value, "default");
+    assert.equal(client.runtime.roomId, "019f2946-aef5-77ad-a41d-747ce0fd6a1e");
+    assert.equal(client.runtime.roomHandle, "old-room");
+    assert.equal(client.runtime.sessionAddress, "@p.a.old");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("PARLE_PROFILES_PATH replaces the default catalog and resolves relative to cwd", () => {
   const home = mkdtempSync(join(tmpdir(), "parle-profiles-path-home-"));
   const cwd = mkdtempSync(join(tmpdir(), "parle-profiles-path-project-"));

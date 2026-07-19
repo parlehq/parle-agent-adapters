@@ -17,6 +17,7 @@ export type ParleMcpClientLike = {
   readInbox(params?: ReadParams): Promise<unknown>;
   affordances(): Promise<unknown>;
   send(params: SendParams): Promise<unknown>;
+  switchProfile?(profile: string, signal?: AbortSignal): Promise<unknown>;
   // Optional lifecycle surface (present on ParleAgentClient); guarded so
   // minimal fake clients keep working.
   ensureReadySafe?(signal?: AbortSignal): Promise<boolean>;
@@ -48,8 +49,13 @@ const statusSchema = {
   inspect: z.boolean().optional(),
 };
 
+const switchProfileSchema = {
+  profile: z.string(),
+  watcherStopped: z.boolean(),
+};
+
 export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgentClient()) {
-  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.0" });
+  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.8" });
 
   server.registerTool("parle_status", {
     title: "Parle Status",
@@ -81,6 +87,29 @@ export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgent
     const summary = await client.connect();
     if (summary && typeof summary === "object") return { ...summary, compactText: compactConnectionCardFromSummary(summary as any) };
     return summary;
+  }));
+
+  server.registerTool("parle_switch_profile", {
+    title: "Switch Parle Profile",
+    description: "Switch this MCP process to another named Parle profile after the host has stopped its sibling responsive watcher. This is ephemeral and never edits environment or profile files. watcherStopped=true is a required host attestation because MCP cannot inspect Claude Code background Bash tasks. On success, restart the bundled watcher with the returned profile, cursor, and agentSessionId.",
+    inputSchema: switchProfileSchema,
+    annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  }, async (params) => safeTool(async () => {
+    if (params.watcherStopped !== true) throw new Error("parle_switch_profile requires watcherStopped=true after the host has verified the sibling watcher task is stopped.");
+    if (typeof client.switchProfile !== "function") throw new Error("This Parle client does not support live profile switching.");
+    const result = await client.switchProfile(params.profile);
+    if (!result || typeof result !== "object") return result;
+    const details = result as any;
+    return {
+      ...details,
+      watcher: details.switched ? {
+        restartRequired: true,
+        profile: details.profile,
+        cursor: details.cursor,
+        agentSessionId: details.agentSessionId,
+        launcherArgs: ["--profile", details.profile, String(details.cursor), details.agentSessionId],
+      } : { restartRequired: false },
+    };
   }));
 
   server.registerTool("parle_guidance", {
@@ -121,7 +150,7 @@ export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgent
 }
 
 export async function runStdio() {
-  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.5" } });
+  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.8" } });
   const server = createParleMcpServer(client);
   installLifecycleHandlers(client);
   await server.connect(new StdioServerTransport());
@@ -175,8 +204,9 @@ export function isDirectRun(metaUrl: string, argvPath = process.argv[1]): boolea
   return Boolean(argvPath) && metaUrl === pathToFileURL(argvPath).href;
 }
 
-export function resolveWatcherEnvironment(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env, onWarning?: (warning: string) => void): NodeJS.ProcessEnv {
-  const config = resolveConfig(cwd, env);
+export function resolveWatcherEnvironment(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env, onWarning?: (warning: string) => void, profile?: string): NodeJS.ProcessEnv {
+  const selectedEnv = profile ? { ...env, PARLE_PROFILE: profile } : env;
+  const config = resolveConfig(cwd, selectedEnv);
   for (const warning of config.warnings) onWarning?.(redactString(warning));
   const roomId = config.roomId?.value;
   const agentToken = config.agentToken?.value;
@@ -185,7 +215,7 @@ export function resolveWatcherEnvironment(cwd = process.cwd(), env: NodeJS.Proce
   }
   // The child receives fully resolved direct values; drop the selector and
   // catalog-path settings so it cannot re-resolve against a different catalog.
-  const childEnv = { ...env };
+  const childEnv = { ...selectedEnv };
   delete childEnv.PARLE_PROFILE;
   delete childEnv.PARLE_PROFILES_PATH;
   return {
@@ -201,10 +231,17 @@ export function resolveWatcherEnvironment(cwd = process.cwd(), env: NodeJS.Proce
 export async function runWatcher(metaUrl: string, args: string[], cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): Promise<number> {
   const worker = join(dirname(fileURLToPath(metaUrl)), "..", "skills", "parle", "scripts", "parle-watch-worker.sh");
   if (!existsSync(worker)) throw new Error("bundled watcher worker is missing; reinstall or rebuild the Claude plugin");
-  const childEnv = resolveWatcherEnvironment(cwd, env, (warning) => console.error(`Parle warning: ${warning}`));
+  let profile: string | undefined;
+  let workerArgs = args;
+  if (args[0] === "--profile") {
+    profile = args[1];
+    if (!profile) throw new Error("--profile requires a named profile");
+    workerArgs = args.slice(2);
+  }
+  const childEnv = resolveWatcherEnvironment(cwd, env, (warning) => console.error(`Parle warning: ${warning}`), profile);
   childEnv.PARLE_WATCH_REQUEST_HELPER = fileURLToPath(metaUrl);
   childEnv.PARLE_WATCH_PARENT_PID = String(process.pid);
-  const child = spawn("sh", [worker, ...args], { cwd, env: childEnv, stdio: "inherit" });
+  const child = spawn("sh", [worker, ...workerArgs], { cwd, env: childEnv, stdio: "inherit" });
   const forward = (signal: NodeJS.Signals) => child.kill(signal);
   process.once("SIGINT", forward);
   process.once("SIGTERM", forward);

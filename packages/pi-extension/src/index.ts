@@ -5,7 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { DEFAULT_API_BASE, DEFAULT_VERSION, catalogGitExposureWarning, loadProfile, formatVersionErrorHint, parseKeyValueFile, parseProfiles, performProfileSwitch, profileCatalogHasProfile, redactString, resolveProfileCatalogPath, summarizeSendDelivery, type CredentialProfile } from "@parlehq/agent-client";
 import { Type } from "typebox";
 const EXTENSION_ID = "25-parle";
-const PI_EXTENSION_VERSION = "0.1.21";
+const PI_EXTENSION_VERSION = "0.1.22";
 const RUNTIME_SCHEMA_VERSION = 1;
 const AI_GUIDANCE_URL = "https://ai.parle.sh";
 const API_LLMS_URL = "https://api.parle.sh/llms.txt";
@@ -1177,6 +1177,9 @@ async function switchProfile(pi: any, ctx: any, profile: string, signal?: AbortS
     resolve() {
       const cfg = resolveConfig(cwd, profile);
       assertRuntimeConfig(cfg);
+      if (runtime.sessionAlias || previousCfg.sessionAlias?.value || cfg.sessionAlias?.value) {
+        throw new Error("Live profile switching is unavailable while PARLE_SESSION_ALIAS is configured because scratch preparation must not supersede the active named route. Restart Pi with the target profile instead.");
+      }
       const sameProfile = previousProfile === profile;
       const sameBinding = sameRoomBinding(previousCfg, cfg);
       const changed = !sameProfile || !sameBinding || !runtime.bootstrapped;

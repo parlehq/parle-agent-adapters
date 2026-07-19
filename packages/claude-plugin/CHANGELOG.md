@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.20 (2026-07-19)
+
+Live profile switching and room-first statusline identity.
+
+- Add guarded `parle_switch_profile` orchestration for named profiles. The Claude skill stops and verifies its sibling watcher, switches the MCP session atomically, then re-arms through the bundled target-profile resolver.
+- Capture the canonical room handle returned during entry and render `#room-handle` in the statusline, with an honest short room-ID fallback.
+
 ## 0.5.18 (2026-07-11)
 
 Bundled MCP refresh clarifying agent-session expiry recovery.

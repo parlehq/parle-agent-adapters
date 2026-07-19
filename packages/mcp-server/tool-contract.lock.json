@@ -78,5 +78,17 @@
     "input": [
       "inspect"
     ]
+  },
+  "parle_switch_profile": {
+    "title": "Switch Parle Profile",
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true
+    },
+    "input": [
+      "profile",
+      "watcherStopped"
+    ]
   }
 }

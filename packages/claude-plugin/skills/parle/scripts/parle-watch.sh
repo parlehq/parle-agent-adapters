@@ -1,7 +1,9 @@
 #!/bin/sh
 # Public Claude watcher entrypoint. Configuration is resolved afresh on every
-# invocation by the bundled Node resolver, including manual re-arms. The room
-# agent token is passed only in the worker child environment.
+# invocation by the bundled Node resolver, including manual re-arms. After a
+# live MCP switch, `--profile NAME` selects that profile explicitly; the Node
+# launcher freezes its concrete binding for the worker. The room agent token is
+# passed only in the worker child environment.
 set -u
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd) || exit 2
 artifact="$script_dir/../../../dist/parle-mcp.js"

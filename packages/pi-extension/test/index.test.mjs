@@ -202,7 +202,7 @@ test("status publishes a display-safe runtime snapshot", async () => {
   assert.equal(snapshot.sessionAddress, "@p.a.raw-session");
   assert.equal(snapshot.roomId, "room-1");
   assert.equal(snapshot.roomHandle, "galexc-intercom");
-  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.21" });
+  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.22" });
   assert.equal(JSON.stringify(snapshot).includes("parle_ses_raw-session"), false);
 });
 
@@ -318,6 +318,19 @@ test("parle_switch_profile prepares the target before atomically replacing room 
   assert.equal(harness.injected.length, 1, "same seq/event from old room must not suppress target-room delivery");
   assert.match(JSON.stringify(harness.injected[0]), /new room/);
   assert.equal(readFileSync(join(cwd, ".env"), "utf8"), "PARLE_WATCH_ENABLED=0\n");
+});
+
+test("parle_switch_profile refuses an active named route before scratch bootstrap", async () => {
+  const cwd = tempProject("PARLE_WATCH_ENABLED=0\n");
+  const catalogDir = join(process.env.HOME, ".parle");
+  mkdirSync(catalogDir, { recursive: true });
+  writeFileSync(join(catalogDir, "profiles"), "[default]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = parle_agt_old\n\n[target]\nroom_id = 019f7b46-178f-7a5a-9f7b-b4af2e045261\nagent_token = parle_agt_target\n", { mode: 0o600 });
+  let called = false;
+  globalThis.fetch = async () => { called = true; return new Response(JSON.stringify({})); };
+  const harness = installHarness(cwd);
+  __testing.patchRuntime({ sessionAlias: "main" });
+  await assert.rejects(harness.call("parle_switch_profile", { profile: "target" }), /PARLE_SESSION_ALIAS/);
+  assert.equal(called, false);
 });
 
 test("live Pi binding refuses naive PARLE_PROFILE edits until parle_switch_profile runs", async () => {

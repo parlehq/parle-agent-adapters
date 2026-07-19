@@ -65,7 +65,7 @@ function scaffold(files, { credentials = false } = {}) {
 test("one live session prints its address", () => {
   const cwd = scaffold({ [`${process.pid}.json`]: liveSnapshot(process.pid) });
   try {
-    assert.equal(run(cwd), "parle ✓ @gilman.galexc.abc123");
+    assert.equal(run(cwd), "#test-room ✓ @gilman.galexc.abc123");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -77,7 +77,7 @@ test("multiple live sessions never display a specific address", () => {
     [`${process.ppid}.json`]: liveSnapshot(process.ppid, { sessionAddress: "@gilman.galexc.other" }),
   });
   try {
-    assert.equal(run(cwd), "parle ✓ 2 sessions");
+    assert.equal(run(cwd), "#test-room ✓ 2 sessions");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -115,11 +115,11 @@ test("a live pid with a mismatched start time reads as reused, not live", { skip
   }
 });
 
-test("full mode adds room and relative expiry for a single live session", () => {
+test("single-session compact and full modes lead with the connected room", () => {
   const cwd = scaffold({ [`${process.pid}.json`]: liveSnapshot(process.pid) });
   try {
-    assert.equal(run(cwd, ["--full"]), "parle ✓ @gilman.galexc.abc123 · test-room · expires in 60m");
-    assert.doesNotMatch(run(cwd), /test-room/);
+    assert.equal(run(cwd, ["--full"]), "#test-room ✓ @gilman.galexc.abc123 · expires in 60m");
+    assert.match(run(cwd), /^#test-room ✓ /);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -132,7 +132,7 @@ test("full mode lists all addresses for multiple live sessions, labeled as cwd s
   });
   try {
     const out = run(cwd, ["--full"]);
-    assert.match(out, /^parle ✓ 2 sessions in cwd: /);
+    assert.match(out, /^#test-room ✓ 2 sessions in cwd: /);
     assert.match(out, /@gilman\.galexc\.abc123/);
     assert.match(out, /@gilman\.galexc\.other/);
   } finally {
@@ -145,11 +145,11 @@ test("fresh unread counts display; stale counts are suppressed in compact and la
   const stale = scaffold({ [`${process.pid}.json`]: liveSnapshot(process.pid, { unreadCount: 2, unreadAsOf: new Date(Date.now() - 420_000).toISOString() }) });
   const zero = scaffold({ [`${process.pid}.json`]: liveSnapshot(process.pid, { unreadCount: 0, unreadAsOf: new Date().toISOString() }) });
   try {
-    assert.equal(run(fresh), "parle ✓ @gilman.galexc.abc123 · 2 unread");
+    assert.equal(run(fresh), "#test-room ✓ @gilman.galexc.abc123 · 2 unread");
     assert.match(run(fresh, ["--full"]), / · 2 unread$/);
-    assert.equal(run(stale), "parle ✓ @gilman.galexc.abc123");
+    assert.equal(run(stale), "#test-room ✓ @gilman.galexc.abc123");
     assert.match(run(stale, ["--full"]), / · unread stale 7m$/);
-    assert.equal(run(zero), "parle ✓ @gilman.galexc.abc123");
+    assert.equal(run(zero), "#test-room ✓ @gilman.galexc.abc123");
   } finally {
     for (const cwd of [fresh, stale, zero]) rmSync(cwd, { recursive: true, force: true });
   }
@@ -161,11 +161,36 @@ test("multi-session unread is an indicator, never a summed number", () => {
     [`${process.ppid}.json`]: liveSnapshot(process.ppid, { sessionAddress: "@gilman.galexc.other", unreadCount: 1, unreadAsOf: new Date().toISOString() }),
   });
   try {
-    assert.equal(run(cwd), "parle ✓ 2 sessions · unread");
+    assert.equal(run(cwd), "#test-room ✓ 2 sessions · unread");
     const full = run(cwd, ["--full"]);
     assert.match(full, /@gilman\.galexc\.abc123 \(2 unread\)/);
     assert.match(full, /@gilman\.galexc\.other \(1 unread\)/);
     assert.doesNotMatch(full, /3 unread/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("connected handleless room uses an honest short-id label", () => {
+  const cwd = scaffold({ [`${process.pid}.json`]: liveSnapshot(process.pid, { roomHandle: undefined, roomId: "019f7b46-178f-7a5a-9f7b-b4af2e045261" }) });
+  try {
+    assert.equal(run(cwd), "#room-019f7b46 ✓ @gilman.galexc.abc123");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("multiple rooms retain a neutral aggregate label while full mode names each room", () => {
+  const cwd = scaffold({
+    [`${process.pid}.json`]: liveSnapshot(process.pid),
+    [`${process.ppid}.json`]: liveSnapshot(process.ppid, { roomHandle: "other-room", roomId: "room-2", sessionAddress: "@gilman.galexc.other" }),
+  });
+  try {
+    assert.equal(run(cwd), "parle ✓ 2 sessions");
+    const full = run(cwd, ["--full"]);
+    assert.match(full, /^parle ✓ 2 sessions in cwd: /);
+    assert.match(full, /#test-room @gilman\.galexc\.abc123/);
+    assert.match(full, /#other-room @gilman\.galexc\.other/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

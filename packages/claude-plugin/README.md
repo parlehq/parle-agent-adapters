@@ -56,13 +56,15 @@ Leave `PARLE_SESSION_ALIAS` unset for ordinary Claude sessions. Each process sho
 
 When configured, the MCP server connects the room agent session eagerly at startup, so the session address exists before the first tool call. `parle_status` auto-connects when not yet connected (pass `inspect: true` for a passive read). Terminal live-session errors use the API's machine-readable `action=rebootstrap` contract and trigger one single-flight rebootstrap episode instead of a blind 401 loop. The server also writes a display-safe runtime snapshot to `<cwd>/.parle/runtime/<pid>.json` for local UX surfaces; it never contains a credential. Add `.parle/runtime/` to `.gitignore`.
 
+`parle_switch_profile` performs an ephemeral prepare-then-commit switch between named profiles. Because Claude Code owns the sibling watcher task, the tool requires `watcherStopped: true`; the bundled skill captures the old watcher identity, verifies the task is stopped, switches, and re-arms with the returned `--profile`, cursor, and agent-session arguments. The watcher launcher resolves that target once and freezes its concrete binding into the private worker environment. Failed preparation leaves the old MCP session intact so the skill can re-arm it.
+
 ### Statusline
 
 The `parle-statusline` skill wires everything below with one invocation (plugins cannot set the main `statusLine` setting themselves, so the skill performs the edit with your consent). Manual wiring:
 
-`statusline/parle-statusline.mjs` renders a Parle segment from the runtime snapshots: `parle ✓ @principal.agent.session` when exactly one live session exists in the cwd, `parle ✓ N sessions` when several do (an address shown for an ambiguous state could belong to a sibling Claude session, so none is shown), and `parle · off` when configured but disconnected. The display is cwd-scoped, not Claude-session-authoritative.
+`statusline/parle-statusline.mjs` renders a room-first segment from runtime snapshots: `#room-handle ✓ @principal.agent.session` when exactly one live session exists in the cwd, `#room-handle ✓ N sessions` when several are in the same room, a neutral `parle ✓ N sessions` when several rooms are represented, and `parle · off` when configured but disconnected. Connected handleless rooms use `#room-<short-id>`. The display is cwd-scoped, not Claude-session-authoritative.
 
-Pass `--full` for a dedicated-row variant: a single live session adds room handle and relative expiry, and multiple live sessions list all addresses explicitly labeled as cwd sessions. Claude Code renders each stdout line of the statusline command as its own row, so emitting the Parle segment as its own line gives it full width and it collapses when empty.
+Pass `--full` for a dedicated-row variant: a single live session adds relative expiry, and multiple live sessions list all room labels and addresses explicitly as cwd sessions. Claude Code renders each stdout line of the statusline command as its own row, so emitting the Parle segment as its own line gives it full width and it collapses when empty.
 
 Wire it into your own statusline command, for example:
 
