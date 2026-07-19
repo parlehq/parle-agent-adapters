@@ -42,6 +42,12 @@ importers:
 
   packages/client: {}
 
+  packages/command-code:
+    dependencies:
+      '@parlehq/mcp-server':
+        specifier: workspace:*
+        version: link:../mcp-server
+
   packages/mcp-server:
     dependencies:
       '@modelcontextprotocol/sdk':

@@ -9,6 +9,7 @@ Use this library when an agent runtime benefits from an extension, plugin, adapt
 - Pi extension: installable today as a Git package.
 - Claude Code plugin: installable today from this repo's plugin marketplace.
 - Generic MCP host: run the bundled stdio server artifact from a clone of this repo.
+- Command Code: install the user-scoped MCP server and Parle skill from this repo.
 - Claude Desktop (MCPB): package scaffold exists and reuses the same bundled MCP server artifact; manual Desktop install validation is pending.
 
 ## Install the Claude Code plugin
@@ -20,6 +21,16 @@ claude plugin install parle-claude-plugin@parlehq
 
 This adds native `parle_*` tools through a bundled MCP server plus a `parle` skill. Configure a `PARLE_PROFILE` backed by the profile catalog (`~/.parle/profiles` by default, `PARLE_PROFILES_PATH` to relocate it), or use direct `PARLE_*` values through process env or a `.env` in the working directory. The MCP server loads once at startup; the standalone watcher resolves through the same shared resolver on every arm. Permission rules use the plugin-qualified prefix `mcp__plugin_parle-claude-plugin_parle__<tool>`. See [`packages/claude-plugin/README.md`](./packages/claude-plugin/README.md) for details.
 
+## Install for Command Code
+
+From a clone of this repository:
+
+```bash
+pnpm -F @parlehq/command-code-adapter install:user
+```
+
+This installs the shared MCP server and a Command Code-native Parle skill at user scope without copying profile credentials into Command Code config. Restart Command Code after installation. See [`packages/command-code/README.md`](./packages/command-code/README.md) for the exact behavior and validation path.
+
 ## Run the MCP server in other hosts
 
 Any MCP host that can launch a local stdio server can run the bundled artifact directly from a clone of this repo:
@@ -28,7 +39,7 @@ Any MCP host that can launch a local stdio server can run the bundled artifact d
 node packages/claude-plugin/dist/parle-mcp.js
 ```
 
-The artifact is self-contained and requires only Node 20 or newer. It exposes the seven v1 tools: `parle_status`, `parle_setup`, `parle_guidance`, `parle_read`, `parle_inbox`, `parle_affordances`, and `parle_send`. An npm `@parlehq/mcp-server` package is planned (issue #1).
+The artifact is self-contained and requires only Node 20 or newer. It exposes the eight v1 tools: `parle_status`, `parle_setup`, `parle_connect`, `parle_guidance`, `parle_read`, `parle_inbox`, `parle_affordances`, and `parle_send`. An npm `@parlehq/mcp-server` package is planned (issue #1).
 
 ## Install the Pi extension
 
@@ -50,18 +61,21 @@ This loads only the Pi extension exposed by this repo's Pi package manifest. The
 
 - `@parlehq/agent-client` - headless TypeScript client primitives for Parle config resolution, sessions, projection reads, redaction, and guarded API access. No harness imports.
 - `@parlehq/pi-extension` - active Pi extension package.
-- `@parlehq/mcp-server` - host-agnostic stdio MCP server exposing the seven v1 Parle tools, bundled into a single artifact with esbuild. Not yet on npm.
+- `@parlehq/mcp-server` - host-agnostic stdio MCP server exposing the eight v1 Parle tools, bundled into a single artifact with esbuild. Not yet on npm.
 - `@parlehq/claude-plugin` (`packages/claude-plugin`) - Claude Code plugin packaging around the bundled MCP server artifact, plus the `parle` skill.
+- `@parlehq/command-code-adapter` (`packages/command-code`) - Command Code user installer and skill packaging around the bundled MCP server artifact.
 - `@parlehq/claude-desktop-extension` (`packages/claude-desktop-extension`) - Claude Desktop MCPB packaging around the bundled MCP server artifact. Manual Desktop validation is still tracked separately.
 
 ## Adapter docs
 
 - Pi: [`packages/pi-extension/README.md`](./packages/pi-extension/README.md) for the Pi tool surface, configuration, and install notes.
 - Claude Code: [`packages/claude-plugin/README.md`](./packages/claude-plugin/README.md) for install, permissions namespacing, and validation notes.
+- Command Code: [`packages/command-code/README.md`](./packages/command-code/README.md) for user installation, skill behavior, and validation notes.
 - MCP server: [`packages/mcp-server/README.md`](./packages/mcp-server/README.md) for the tool contract and build.
 - Claude Desktop: [`packages/claude-desktop-extension/README.md`](./packages/claude-desktop-extension/README.md) for MCPB build and validation.
 - Adapter maintenance strategy: [`docs/design/adapter-maintenance-strategy.md`](./docs/design/adapter-maintenance-strategy.md) for shared client, MCP wrapper, Pi, Claude Code, and Desktop boundaries.
 - API-first adapter foundation: [`docs/design/api-first-adapter-foundation.md`](./docs/design/api-first-adapter-foundation.md) for the doctrine that Parle HTTP semantics are canonical and adapters stay thin.
+- Command Code adapter: [`docs/design/command-code-adapter.md`](./docs/design/command-code-adapter.md) for the evidence-backed wrapper decision and failed-session lessons.
 
 ## Boundary rules
 
