@@ -5,7 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { DEFAULT_API_BASE, DEFAULT_VERSION, catalogGitExposureWarning, loadProfile, formatVersionErrorHint, parseKeyValueFile, parseProfiles, profileCatalogHasProfile, redactString, resolveProfileCatalogPath, summarizeSendDelivery, type CredentialProfile } from "@parlehq/agent-client";
 import { Type } from "typebox";
 const EXTENSION_ID = "25-parle";
-const PI_EXTENSION_VERSION = "0.1.17";
+const PI_EXTENSION_VERSION = "0.1.18";
 const RUNTIME_SCHEMA_VERSION = 1;
 const AI_GUIDANCE_URL = "https://ai.parle.sh";
 const API_LLMS_URL = "https://api.parle.sh/llms.txt";
@@ -119,17 +119,23 @@ type ParleLoginParams = {
   reason?: string;
 };
 
+type ParleCreateRoomParams = {
+  roomHandle?: string;
+  kind: "private" | "shared";
+  confirmMutation?: boolean;
+  reason?: string;
+};
+
 type ParleRequestParams = {
   method?: string;
   path?: string;
   url?: string;
-  authMode?: "none" | "agent_token" | "human_session";
+  authMode?: "none" | "agent_token";
   headers?: Record<string, string>;
   body?: unknown;
   confirmMutation?: boolean;
   confirmScope?: string;
   reason?: string;
-  confirmUserCredentialHostPairing?: boolean;
 };
 
 type ParleReadParams = {
@@ -391,7 +397,7 @@ function readSessionCookieFile(path: string): string | undefined {
     const link = lstatSync(path);
     const stat = link.isSymbolicLink() ? statSync(path) : link;
     if (!stat.isFile()) return undefined;
-    if (process.platform !== "win32" && stat.uid !== process.getuid?.()) return undefined;
+    if (process.platform !== "win32" && (stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0)) return undefined;
     const value = readFileSync(path, "utf8").trim();
     return value || undefined;
   } catch {
@@ -658,6 +664,59 @@ async function humanJson(cfg: ParleConfig, path: string, cookie: string, options
   return json ?? {};
 }
 
+const RESERVED_HANDLES = new Set(["admin", "agent", "agents", "api", "me", "null", "parle", "room", "rooms", "root", "support", "system", "www"]);
+
+function validateRoomHandle(rawRoomHandle: string): string {
+  const roomHandle = rawRoomHandle.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]{0,18}[a-z0-9]$/.test(roomHandle) || roomHandle.includes("--") || RESERVED_HANDLES.has(roomHandle)) {
+    throw new Error("parle_create_room roomHandle must normalize to an unreserved 2-20 character handle using lowercase letters, digits, and hyphens with no leading, trailing, or consecutive hyphens.");
+  }
+  return roomHandle;
+}
+
+async function parleCreateRoom(cfg: ParleConfig, params: ParleCreateRoomParams, signal?: AbortSignal) {
+  assertEnabled(cfg);
+  assertSafeBase(cfg.apiBase.value);
+  if (params.confirmMutation !== true || !params.reason?.trim()) {
+    throw new Error("parle_create_room requires confirmMutation=true and a reason for POST /v/rooms.");
+  }
+  if (params.kind !== "private" && params.kind !== "shared") {
+    throw new Error('parle_create_room kind must be "private" or "shared".');
+  }
+  const roomHandle = params.roomHandle === undefined ? undefined : validateRoomHandle(params.roomHandle);
+  if (params.kind === "private" && !roomHandle) {
+    throw new Error("parle_create_room requires roomHandle for a private room.");
+  }
+  const sessionCookie = cfg.sessionCookie?.value;
+  if (!sessionCookie) {
+    throw new Error(`parle_create_room requires PARLE_SESSION_COOKIE in env or .env, or a session file at ${sessionCookieFilePath(cfg.profilesPath.value)} (written by parle_login complete).`);
+  }
+
+  const response = await humanJson(cfg, "/v/rooms", sessionCookie, {
+    method: "POST",
+    body: {
+      kind: params.kind,
+      ...(roomHandle ? { room_handle: roomHandle } : {}),
+    },
+    signal,
+  });
+  if (typeof response.room_id !== "string" || response.kind !== params.kind) {
+    throw new Error("Parle room creation succeeded without the expected room_id and kind.");
+  }
+  if (roomHandle && response.room_handle !== roomHandle) {
+    throw new Error("Parle room creation returned an unexpected room_handle.");
+  }
+  if (params.kind === "shared" && typeof response.seat_id !== "string") {
+    throw new Error("Parle shared-room creation succeeded without an owner seat_id.");
+  }
+  return {
+    room_id: response.room_id,
+    room_handle: response.room_handle,
+    kind: response.kind,
+    seat_id: response.seat_id,
+  };
+}
+
 async function parleLogin(ctx: any, cfg: ParleConfig, params: ParleLoginParams, signal?: AbortSignal) {
   assertEnabled(cfg);
   assertSafeBase(cfg.apiBase.value);
@@ -790,8 +849,6 @@ async function parleRequest(cfg: ParleConfig, params: ParleRequestParams, signal
     assertRuntimeConfig(cfg);
     headers.Authorization = `Bearer ${cfg.agentToken!.value}`;
     if (runtimeSession?.sessionHandle) headers["Parle-Agent-Session"] = runtimeSession.sessionHandle;
-  } else if (authMode === "human_session") {
-    throw new Error("Human session cookie auth is setup/admin only and is not implemented for automatic runtime use in v1.");
   }
   const response = await fetch(url, { method, headers, body, signal });
   const responseText = redactString(await response.text());
@@ -1481,6 +1538,12 @@ function statusDetails(ctx: any) {
     principalHandle: redactedValue(cfg.principalHandle),
     agentHandle: redactedValue(cfg.agentHandle),
     sessionCookie: redactedValue(cfg.sessionCookie),
+    humanSession: {
+      configured: Boolean(cfg.sessionCookie?.value),
+      genericRequest: "unsupported",
+      supportedTools: ["parle_login", "parle_create_room"],
+      note: "Human-session credentials are restricted to typed account-plane tools and are never available to parle_request.",
+    },
     sessionAlias: redactedValue(cfg.sessionAlias),
     watchEnabled: redactedValue(cfg.watchEnabled),
     profile: redactedValue(cfg.profile),
@@ -1754,20 +1817,37 @@ export default function parleExtension(pi: any) {
   });
 
   pi.registerTool({
+    name: "parle_create_room",
+    label: "Parle Create Room",
+    description: "Create one private or shared room through the fixed POST /v/rooms human-session endpoint. The session cookie is read only from resolved local configuration and never accepted or returned by this tool. This operation does not mint tokens, add members, or configure moderation.",
+    parameters: Type.Object({
+      roomHandle: Type.Optional(Type.String({ description: "Room handle. Required for private rooms; optional for shared rooms. Trimmed and normalized to lowercase, then validated as an unreserved 2-20 character handle using letters, digits, and hyphens with no leading, trailing, or consecutive hyphens." })),
+      kind: Type.Unsafe({ type: "string", enum: ["private", "shared"] }),
+      confirmMutation: Type.Optional(Type.Boolean({ description: "Must be true to confirm the fixed POST /v/rooms mutation." })),
+      reason: Type.Optional(Type.String({ description: "Required explanation for creating the room." })),
+    }),
+    async execute(_id, params: ParleCreateRoomParams, signal, _update, ctx) {
+      lastCtx = ctx;
+      const cfg = resolveConfig(ctx.cwd || process.cwd());
+      const details = await parleCreateRoom(cfg, params, signal);
+      return formatResult(details);
+    },
+  });
+
+  pi.registerTool({
     name: "parle_request",
     label: "Parle Request",
-    description: "Generic guarded request to allowlisted Parle URLs with redaction, response caps, explicit auth mode, and mutation confirmation. For room routes, authMode:'agent_token' is normally required. Prefer parle_send for message submits because it supplies Idempotency-Key and direct addressing correctly.",
+    description: "Generic guarded request to allowlisted Parle URLs with redaction, response caps, agent-token or unauthenticated auth modes, and mutation confirmation. Human-session auth is intentionally unsupported here; use typed account-plane tools such as parle_login and parle_create_room. Prefer parle_send for message submits because it supplies Idempotency-Key and direct addressing correctly.",
     parameters: Type.Object({
       method: Type.Optional(Type.String()),
       path: Type.Optional(Type.String()),
       url: Type.Optional(Type.String()),
-      authMode: Type.Optional(Type.Unsafe({ type: "string", enum: ["none", "agent_token", "human_session"] })),
+      authMode: Type.Optional(Type.Unsafe({ type: "string", enum: ["none", "agent_token"] })),
       headers: Type.Optional(Type.Object({}, { additionalProperties: Type.String() })),
       body: Type.Optional(Type.Any()),
       confirmMutation: Type.Optional(Type.Boolean()),
       confirmScope: Type.Optional(Type.String()),
       reason: Type.Optional(Type.String()),
-      confirmUserCredentialHostPairing: Type.Optional(Type.Boolean()),
     }),
     async execute(_id, params: ParleRequestParams, signal, _update, ctx) {
       lastCtx = ctx;

@@ -197,7 +197,7 @@ test("status publishes a display-safe runtime snapshot", async () => {
   assert.equal(snapshot.sessionAddress, "@p.a.raw-session");
   assert.equal(snapshot.roomId, "room-1");
   assert.equal(snapshot.roomHandle, "galexc-intercom");
-  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.17" });
+  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.18" });
   assert.equal(JSON.stringify(snapshot).includes("parle_ses_raw-session"), false);
 });
 
@@ -280,6 +280,84 @@ test("mutating request requires exact confirmation scope", async () => {
   );
   const ok = await harness.call("parle_request", { method: "POST", path: "/v/rooms", confirmMutation: true, confirmScope: "POST /v/rooms", reason: "test" });
   assert.equal(ok.details.ok, true);
+});
+
+test("session cookie files fail closed when group or world accessible", async () => {
+  const cwd = tempProject("PARLE_WATCH_ENABLED=0\n");
+  const secretsDir = join(process.env.HOME, ".parle");
+  mkdirSync(secretsDir, { recursive: true });
+  writeFileSync(join(secretsDir, "session"), "__Host-parle_session=parle_sess_insecure\n", { mode: 0o644 });
+  const status = await installHarness(cwd).call("parle_status");
+  assert.equal(status.details.sessionCookie.set, false);
+  assert.equal(status.details.humanSession.configured, false);
+});
+
+test("parle_create_room uses only the configured cookie and fixed room endpoint", async () => {
+  const cwd = tempProject("PARLE_WATCH_ENABLED=0\n");
+  const secretsDir = join(process.env.HOME, ".parle");
+  mkdirSync(secretsDir, { recursive: true });
+  writeFileSync(join(secretsDir, "session"), "__Host-parle_session=parle_sess_create-secret\n", { mode: 0o600 });
+  let request;
+  globalThis.fetch = async (url, init = {}) => {
+    request = { url: String(url), init };
+    return new Response(JSON.stringify({
+      room_id: "019f7b3b-996e-7548-805a-5ed0784f676c",
+      room_handle: "galexc-kyleops",
+      kind: "shared",
+      seat_id: "019f7b3b-996e-7548-805a-5ed0784f676d",
+      token: "parle_agt_must-not-escape",
+    }), { status: 201, headers: { "Set-Cookie": "__Host-parle_session=parle_sess_must-not-escape" } });
+  };
+  const harness = installHarness(cwd);
+
+  const result = await harness.call("parle_create_room", {
+    roomHandle: "  GalexC-KyleOps  ",
+    kind: "shared",
+    confirmMutation: true,
+    reason: "Create the Gilman and Kyle operations room",
+  });
+
+  assert.equal(request.url, "https://api.parle.sh/v/rooms");
+  assert.equal(request.init.method, "POST");
+  assert.equal(request.init.headers.Cookie, "__Host-parle_session=parle_sess_create-secret");
+  assert.deepEqual(JSON.parse(request.init.body), { kind: "shared", room_handle: "galexc-kyleops" });
+  assert.deepEqual(result.details, {
+    room_id: "019f7b3b-996e-7548-805a-5ed0784f676c",
+    room_handle: "galexc-kyleops",
+    kind: "shared",
+    seat_id: "019f7b3b-996e-7548-805a-5ed0784f676d",
+  });
+  assert.equal(JSON.stringify(result).includes("must-not-escape"), false);
+  assert.deepEqual(Object.keys(harness.tools.parle_create_room.parameters.properties).sort(), ["confirmMutation", "kind", "reason", "roomHandle"]);
+});
+
+test("parle_create_room fails closed before fetch for missing confirmation, cookie, or invalid shape", async () => {
+  const cwd = tempProject("PARLE_WATCH_ENABLED=0\n");
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    return new Response("{}", { status: 201 });
+  };
+  const harness = installHarness(cwd);
+
+  await assert.rejects(harness.call("parle_create_room", { roomHandle: "galexc-kyleops", kind: "shared", reason: "test" }), /confirmMutation=true/);
+  await assert.rejects(harness.call("parle_create_room", { roomHandle: "bad_handle", kind: "shared", confirmMutation: true, reason: "test" }), /roomHandle must normalize/);
+  await assert.rejects(harness.call("parle_create_room", { roomHandle: "admin", kind: "shared", confirmMutation: true, reason: "test" }), /roomHandle must normalize/);
+  await assert.rejects(harness.call("parle_create_room", { kind: "private", confirmMutation: true, reason: "test" }), /requires roomHandle/);
+  await assert.rejects(harness.call("parle_create_room", { roomHandle: "galexc-kyleops", kind: "shared", confirmMutation: true, reason: "test" }), /requires PARLE_SESSION_COOKIE/);
+  assert.equal(called, false);
+});
+
+test("generic parle_request honestly excludes human-session auth", async () => {
+  const cwd = tempProject("PARLE_WATCH_ENABLED=0\n");
+  globalThis.fetch = async () => new Response("{}", { status: 200 });
+  const harness = installHarness(cwd);
+  const authModeSchema = harness.tools.parle_request.parameters.properties.authMode;
+  assert.deepEqual(authModeSchema.enum, ["none", "agent_token"]);
+
+  const status = await harness.call("parle_status");
+  assert.equal(status.details.humanSession.genericRequest, "unsupported");
+  assert.deepEqual(status.details.humanSession.supportedTools, ["parle_login", "parle_create_room"]);
 });
 
 test("parle_login starts email login without requiring raw request plumbing", async () => {
