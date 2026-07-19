@@ -15,8 +15,10 @@
 # any new room row wakes you (v1 behavior).
 #
 # Session liveness: the projection poll authenticates with the room agent
-# token alone, so the server cannot tell this script that the session it
-# filters on has died (host reload, session end). When my_agent_session_id
+# token plus a dedicated watcher-session credential owned by the Node launcher.
+# That credential is distinct from the primary session this script filters on,
+# so the server still cannot tell this script that the filtered session has
+# died (host reload, session end). When my_agent_session_id
 # is set, each cycle also checks the local .parle/runtime/*.json snapshots
 # the adapters publish. Own-snapshot evidence is classified before absence
 # counts for anything: a snapshot carrying this id that is expired (or within
@@ -56,6 +58,7 @@ me="${2:-}"
 : "${PARLE_API_BASE:?resolved watcher configuration missing}"
 : "${PARLE_ROOM_ID:?resolved watcher configuration missing}"
 : "${PARLE_ROOM_AGENT_TOKEN:?resolved watcher configuration missing}"
+: "${PARLE_WATCH_AGENT_SESSION:?dedicated watcher session missing}"
 : "${PARLE_VERSION:?resolved watcher configuration missing}"
 : "${PARLE_WATCH_REQUEST_HELPER:?bundled watch request helper missing}"
 : "${PARLE_WATCH_PARENT_PID:?watch launcher pid missing}"

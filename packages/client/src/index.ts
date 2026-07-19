@@ -870,6 +870,21 @@ export class ParleAgentClient {
     if (!this.runtime.bootstrapped || !this.runtime.sessionHandle) await this.bootstrap(signal);
   }
 
+  /**
+   * Internal bridge for a colocated watcher process. The returned credential is
+   * secret and may only be passed through a private child environment into an
+   * authenticated room request. Never return, log, persist, or place it in argv.
+   */
+  watcherSessionAuth(): { agentSessionId: string; sessionCredential: string } {
+    if (!this.runtime.bootstrapped || !this.runtime.agentSessionId || !this.runtime.sessionHandle) {
+      throw new Error("Parle watcher session is not bootstrapped.");
+    }
+    return {
+      agentSessionId: this.runtime.agentSessionId,
+      sessionCredential: this.runtime.sessionHandle,
+    };
+  }
+
   async switchProfile(profile: string, signal?: AbortSignal): Promise<ClientProfileSwitchResult> {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(profile)) {
       throw new Error("Parle profile must be 1 to 64 characters and contain only letters, numbers, dot, underscore, or hyphen, starting with a letter or number.");

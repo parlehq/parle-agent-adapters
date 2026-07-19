@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- Refresh the shared MCP artifact with dedicated watcher-session support. Command Code remains tools-only and does not launch the Claude Code watcher.
+
 ## 0.1.1
 
 - Refresh the shared MCP artifact with canonical room-handle capture and ephemeral profile switching. Command Code remains tools-only with no adapter-owned watcher or footer.

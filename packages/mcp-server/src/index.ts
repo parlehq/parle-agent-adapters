@@ -55,7 +55,7 @@ const switchProfileSchema = {
 };
 
 export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgentClient()) {
-  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.8" });
+  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.9" });
 
   server.registerTool("parle_status", {
     title: "Parle Status",
@@ -150,7 +150,7 @@ export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgent
 }
 
 export async function runStdio() {
-  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.8" } });
+  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.9" } });
   const server = createParleMcpServer(client);
   installLifecycleHandlers(client);
   await server.connect(new StdioServerTransport());
@@ -239,28 +239,58 @@ export async function runWatcher(metaUrl: string, args: string[], cwd = process.
     workerArgs = args.slice(2);
   }
   const childEnv = resolveWatcherEnvironment(cwd, env, (warning) => console.error(`Parle warning: ${warning}`), profile);
-  childEnv.PARLE_WATCH_REQUEST_HELPER = fileURLToPath(metaUrl);
-  childEnv.PARLE_WATCH_PARENT_PID = String(process.pid);
-  const child = spawn("sh", [worker, ...workerArgs], { cwd, env: childEnv, stdio: "inherit" });
-  const forward = (signal: NodeJS.Signals) => child.kill(signal);
-  process.once("SIGINT", forward);
-  process.once("SIGTERM", forward);
-  return new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
+  // Shared rooms require the room-bound token and a live entered agent session.
+  // The watcher owns a dedicated short-lived session so the primary MCP
+  // credential never crosses the stdio process boundary. Its credential moves
+  // only through this private child environment and is retired on every exit.
+  // Resolve the already-frozen direct binding away from the host cwd so a
+  // project .env profile selector cannot conflict when this helper client
+  // reads configuration a second time.
+  // A watcher session is intentionally anonymous within the agent. It must
+  // never claim or supersede the primary host's singleton named route.
+  delete childEnv.PARLE_SESSION_ALIAS;
+  childEnv.PARLE_UNREAD_POLL_INTERVAL_SECONDS = "0";
+  const watcherClient = new ParleAgentClient({ cwd: dirname(fileURLToPath(metaUrl)), env: childEnv });
+  try {
+    await watcherClient.bootstrap();
+    const watcherAuth = watcherClient.watcherSessionAuth();
+    childEnv.PARLE_WATCH_AGENT_SESSION = watcherAuth.sessionCredential;
+    childEnv.PARLE_WATCH_REQUEST_HELPER = fileURLToPath(metaUrl);
+    childEnv.PARLE_WATCH_PARENT_PID = String(process.pid);
+    const child = spawn("sh", [worker, ...workerArgs], { cwd, env: childEnv, stdio: "inherit" });
+    let forceStop: ReturnType<typeof setTimeout> | undefined;
+    const forward = (signal: NodeJS.Signals) => {
+      child.kill(signal);
+      // The shell may be waiting on its one-shot Node request helper. Bound host
+      // shutdown even when that grandchild delays signal delivery; it separately
+      // monitors this launcher's pid and aborts once the launcher exits.
+      forceStop = setTimeout(() => child.kill("SIGKILL"), 1000);
+      forceStop.unref();
+    };
+    process.once("SIGINT", forward);
+    process.once("SIGTERM", forward);
+    try {
+      return await new Promise<number>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code, signal) => resolve(code ?? (signal ? 128 : 2)));
+      });
+    } finally {
+      if (forceStop) clearTimeout(forceStop);
       process.removeListener("SIGINT", forward);
       process.removeListener("SIGTERM", forward);
-      resolve(code ?? (signal ? 128 : 2));
-    });
-  });
+    }
+  } finally {
+    await watcherClient.endSession().catch(() => {});
+  }
 }
 
 async function runWatcherRequest(since: string): Promise<void> {
   const apiBase = process.env.PARLE_API_BASE;
   const roomId = process.env.PARLE_ROOM_ID;
   const token = process.env.PARLE_ROOM_AGENT_TOKEN;
+  const sessionCredential = process.env.PARLE_WATCH_AGENT_SESSION;
   const version = process.env.PARLE_VERSION;
-  if (!apiBase || !roomId || !token || !version) throw new Error("watch request configuration is missing");
+  if (!apiBase || !roomId || !token || !sessionCredential || !version) throw new Error("watch request configuration is missing");
   const url = new URL(`/v/rooms/${encodeURIComponent(roomId)}/projection`, apiBase);
   url.searchParams.set("since_seq", since);
   url.searchParams.set("wait", "25");
@@ -277,12 +307,12 @@ async function runWatcherRequest(since: string): Promise<void> {
   parentMonitor?.unref();
   try {
     const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}`, "Parle-Version": version, Connection: "close" },
+      headers: { Authorization: `Bearer ${token}`, "Parle-Agent-Session": sessionCredential, "Parle-Version": version, Connection: "close" },
       signal: controller.signal,
     });
     const raw = await response.text();
-    const withoutExactToken = raw.split(token).join("<redacted>");
-    await new Promise<void>((resolve) => process.stdout.write(`${response.status}\n${redactString(withoutExactToken)}`, () => resolve()));
+    const withoutSecrets = raw.split(token).join("<redacted>").split(sessionCredential).join("<redacted>");
+    await new Promise<void>((resolve) => process.stdout.write(`${response.status}\n${redactString(withoutSecrets)}`, () => resolve()));
   } catch {
     await new Promise<void>((resolve) => process.stdout.write("000\n{}", () => resolve()));
   } finally {

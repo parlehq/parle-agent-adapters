@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.21 (2026-07-19)
+
+Shared-room responsive watcher authentication.
+
+- Bootstrap one dedicated, short-lived watcher session per arm so projection reads present both the room-bound token and a live entered agent-session credential.
+- Keep the primary MCP credential inside its process, pass the watcher credential only through a private child environment, and retire the watcher session on exit.
+
 ## 0.5.20 (2026-07-19)
 
 Live profile switching and room-first statusline identity.

@@ -26,11 +26,32 @@ function canVerifyStart() {
 }
 const haveStartVerify = canVerifyStart();
 
-function stubServer(body) {
+function stubServer(body, onRequest) {
   return new Promise((resolveServer) => {
     const server = createServer((req, res) => {
+      const url = new URL(req.url, "http://watch.test");
+      onRequest?.(req, url);
+      let response;
+      if (req.method === "POST" && url.pathname === "/v/agent/sessions") {
+        response = {
+          agent_session_id: "019f2946-aef5-77ad-a41d-747ce0fd6a11",
+          session_credential: "parle_ses_watch_private",
+          address: "@p.a.watcher",
+          expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        };
+      } else if (req.method === "POST" && url.pathname.endsWith("/participants")) {
+        response = { participant_id: "019f2946-aef5-77ad-a41d-747ce0fd6a12", room_handle: "watch-room" };
+      } else if (req.method === "POST" && url.pathname.endsWith("/end")) {
+        res.writeHead(204, { Connection: "close" });
+        res.end();
+        return;
+      } else if (url.pathname.endsWith("/projection") && url.searchParams.get("wait") === "0") {
+        response = { messages: [], watermark: 1 };
+      } else {
+        response = typeof body === "function" ? body(req) : body;
+      }
       res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
-      res.end(JSON.stringify(typeof body === "function" ? body(req) : body));
+      res.end(JSON.stringify(response));
     });
     server.listen(0, "127.0.0.1", () => resolveServer(server));
   });
@@ -65,6 +86,7 @@ function runWatch(cwd, apiBase, args, extraEnv = {}) {
     PARLE_API_BASE: apiBase,
     PARLE_ROOM_ID: "room-1",
     PARLE_ROOM_AGENT_TOKEN: "parle_agt_test",
+    PARLE_ALLOW_INSECURE_LOCAL: "1",
     ...extraEnv,
   };
   for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
@@ -110,13 +132,13 @@ test("watch resolves a named profile on every manual re-arm without exposing its
     writeFileSync(profilePath, `[claude]\nroom_id = ${roomId}\nagent_token = ${firstToken}\napi_base = http://127.0.0.1:${server.address().port}\n`, { mode: 0o600 });
     const cleanEnv = { HOME: home, PARLE_API_BASE: undefined, PARLE_ROOM_ID: undefined, PARLE_ROOM_AGENT_TOKEN: undefined, PARLE_PROFILE: undefined };
     const first = runWatch(cwd, "unused", ["1"], cleanEnv);
-    assert.equal(await first.exited, 0);
+    assert.equal(await first.exited, 0, first.err());
     assert.equal(first.out().includes(firstToken), false);
     assert.equal(first.err().includes(firstToken), false);
 
     writeFileSync(profilePath, `[claude]\nroom_id = ${roomId}\nagent_token = ${secondToken}\napi_base = http://127.0.0.1:${server.address().port}\n`, { mode: 0o600 });
     const second = runWatch(cwd, "unused", ["1"], cleanEnv);
-    assert.equal(await second.exited, 0);
+    assert.equal(await second.exited, 0, second.err());
     assert.equal(second.out().includes(secondToken), false);
     assert.equal(second.err().includes(secondToken), false);
     assert.deepEqual(seenAuth, [`Bearer ${firstToken}`, `Bearer ${secondToken}`]);
@@ -131,9 +153,20 @@ test("watch --profile selects the switched profile and freezes its token outside
   const cwd = mkdtempSync(join(tmpdir(), "parle-watch-switched-project-"));
   const home = mkdtempSync(join(tmpdir(), "parle-watch-switched-home-"));
   const seenAuth = [];
+  const seenSessions = [];
+  const requests = [];
+  const sessionBodies = [];
   const server = await stubServer((req) => {
     seenAuth.push(req.headers.authorization);
+    seenSessions.push(req.headers["parle-agent-session"]);
     return { messages: [{ seq: 2, author: { agent_session_id: "session-other" }, addressing: { kind: "unaddressed" } }], watermark: 2 };
+  }, (req, url) => {
+    requests.push(`${req.method} ${url.pathname}?wait=${url.searchParams.get("wait") || ""}`);
+    if (req.method === "POST" && url.pathname === "/v/agent/sessions") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => sessionBodies.push(body));
+    }
   });
   const oldToken = "parle_agt_old_profile_secret";
   const targetToken = "parle_agt_target_profile_secret";
@@ -141,10 +174,20 @@ test("watch --profile selects the switched profile and freezes its token outside
     mkdirSync(join(home, ".parle"), { recursive: true, mode: 0o700 });
     writeFileSync(join(cwd, ".env"), "PARLE_PROFILE=old\n");
     writeFileSync(join(home, ".parle", "profiles"), `[old]\nroom_id = 019f2946-aef5-77ad-a41d-747ce0fd6a1e\nagent_token = ${oldToken}\napi_base = http://127.0.0.1:${server.address().port}\n\n[target]\nroom_id = 019f7b46-178f-7a5a-9f7b-b4af2e045261\nagent_token = ${targetToken}\napi_base = http://127.0.0.1:${server.address().port}\n`, { mode: 0o600 });
-    const watch = runWatch(cwd, "unused", ["--profile", "target", "1"], { HOME: home, PARLE_API_BASE: undefined, PARLE_ROOM_ID: undefined, PARLE_ROOM_AGENT_TOKEN: undefined, PARLE_PROFILE: undefined });
-    assert.equal(await watch.exited, 0);
+    const watch = runWatch(cwd, "unused", ["--profile", "target", "1"], { HOME: home, PARLE_API_BASE: undefined, PARLE_ROOM_ID: undefined, PARLE_ROOM_AGENT_TOKEN: undefined, PARLE_PROFILE: undefined, PARLE_SESSION_ALIAS: "primary-route" });
+    assert.equal(await watch.exited, 0, watch.err());
     assert.deepEqual(seenAuth, [`Bearer ${targetToken}`]);
+    assert.deepEqual(seenSessions, ["parle_ses_watch_private"]);
+    assert.deepEqual(sessionBodies, ["{}"], "dedicated watcher must not claim the primary session alias");
+    assert.deepEqual(requests, [
+      "POST /v/agent/sessions?wait=",
+      "POST /v/rooms/019f7b46-178f-7a5a-9f7b-b4af2e045261/participants?wait=",
+      "GET /v/rooms/019f7b46-178f-7a5a-9f7b-b4af2e045261/projection?wait=0",
+      "GET /v/rooms/019f7b46-178f-7a5a-9f7b-b4af2e045261/projection?wait=25",
+      "POST /v/agent/sessions/019f2946-aef5-77ad-a41d-747ce0fd6a11/end?wait=",
+    ]);
     assert.equal(watch.out().includes(targetToken), false);
+    assert.equal(watch.out().includes("parle_ses_watch_private"), false);
     assert.equal(watch.err().includes(targetToken), false);
     const ps = spawnSync("ps", ["-o", "command=", "-p", String(watch.child.pid)], { encoding: "utf8" });
     assert.equal((ps.stdout || "").includes(targetToken), false);

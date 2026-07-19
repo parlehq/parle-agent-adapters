@@ -31958,6 +31958,20 @@ var ParleAgentClient = class _ParleAgentClient {
     if (!this.runtime.bootstrapped || !this.runtime.sessionHandle)
       await this.bootstrap(signal);
   }
+  /**
+   * Internal bridge for a colocated watcher process. The returned credential is
+   * secret and may only be passed through a private child environment into an
+   * authenticated room request. Never return, log, persist, or place it in argv.
+   */
+  watcherSessionAuth() {
+    if (!this.runtime.bootstrapped || !this.runtime.agentSessionId || !this.runtime.sessionHandle) {
+      throw new Error("Parle watcher session is not bootstrapped.");
+    }
+    return {
+      agentSessionId: this.runtime.agentSessionId,
+      sessionCredential: this.runtime.sessionHandle
+    };
+  }
   async switchProfile(profile, signal) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(profile)) {
       throw new Error("Parle profile must be 1 to 64 characters and contain only letters, numbers, dot, underscore, or hyphen, starting with a letter or number.");
@@ -32363,7 +32377,7 @@ var switchProfileSchema = {
   watcherStopped: external_exports.boolean()
 };
 function createParleMcpServer(client = new ParleAgentClient()) {
-  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.8" });
+  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.9" });
   server.registerTool("parle_status", {
     title: "Parle Status",
     description: "Show redacted Parle config provenance and runtime state. The result's compactText is the standard card for user-facing status: render it verbatim instead of paraphrasing; config and runtime are diagnostic detail. When configured and not yet connected, this auto-connects the session first (single-flight, backoff-aware); pass inspect:true for a passive read with no network side effects.",
@@ -32447,7 +32461,7 @@ function createParleMcpServer(client = new ParleAgentClient()) {
   return server;
 }
 async function runStdio() {
-  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.8" } });
+  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.9" } });
   const server = createParleMcpServer(client);
   installLifecycleHandlers(client);
   await server.connect(new StdioServerTransport());
@@ -32521,27 +32535,46 @@ async function runWatcher(metaUrl, args, cwd = process.cwd(), env = process.env)
     workerArgs = args.slice(2);
   }
   const childEnv = resolveWatcherEnvironment(cwd, env, (warning) => console.error(`Parle warning: ${warning}`), profile);
-  childEnv.PARLE_WATCH_REQUEST_HELPER = fileURLToPath(metaUrl);
-  childEnv.PARLE_WATCH_PARENT_PID = String(process.pid);
-  const child = spawn("sh", [worker, ...workerArgs], { cwd, env: childEnv, stdio: "inherit" });
-  const forward = (signal) => child.kill(signal);
-  process.once("SIGINT", forward);
-  process.once("SIGTERM", forward);
-  return new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
+  delete childEnv.PARLE_SESSION_ALIAS;
+  childEnv.PARLE_UNREAD_POLL_INTERVAL_SECONDS = "0";
+  const watcherClient = new ParleAgentClient({ cwd: dirname2(fileURLToPath(metaUrl)), env: childEnv });
+  try {
+    await watcherClient.bootstrap();
+    const watcherAuth = watcherClient.watcherSessionAuth();
+    childEnv.PARLE_WATCH_AGENT_SESSION = watcherAuth.sessionCredential;
+    childEnv.PARLE_WATCH_REQUEST_HELPER = fileURLToPath(metaUrl);
+    childEnv.PARLE_WATCH_PARENT_PID = String(process.pid);
+    const child = spawn("sh", [worker, ...workerArgs], { cwd, env: childEnv, stdio: "inherit" });
+    let forceStop;
+    const forward = (signal) => {
+      child.kill(signal);
+      forceStop = setTimeout(() => child.kill("SIGKILL"), 1e3);
+      forceStop.unref();
+    };
+    process.once("SIGINT", forward);
+    process.once("SIGTERM", forward);
+    try {
+      return await new Promise((resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code, signal) => resolve(code ?? (signal ? 128 : 2)));
+      });
+    } finally {
+      if (forceStop) clearTimeout(forceStop);
       process.removeListener("SIGINT", forward);
       process.removeListener("SIGTERM", forward);
-      resolve(code ?? (signal ? 128 : 2));
+    }
+  } finally {
+    await watcherClient.endSession().catch(() => {
     });
-  });
+  }
 }
 async function runWatcherRequest(since) {
   const apiBase = process.env.PARLE_API_BASE;
   const roomId = process.env.PARLE_ROOM_ID;
   const token = process.env.PARLE_ROOM_AGENT_TOKEN;
+  const sessionCredential = process.env.PARLE_WATCH_AGENT_SESSION;
   const version2 = process.env.PARLE_VERSION;
-  if (!apiBase || !roomId || !token || !version2) throw new Error("watch request configuration is missing");
+  if (!apiBase || !roomId || !token || !sessionCredential || !version2) throw new Error("watch request configuration is missing");
   const url2 = new URL(`/v/rooms/${encodeURIComponent(roomId)}/projection`, apiBase);
   url2.searchParams.set("since_seq", since);
   url2.searchParams.set("wait", "25");
@@ -32558,13 +32591,13 @@ async function runWatcherRequest(since) {
   parentMonitor?.unref();
   try {
     const response = await fetch(url2, {
-      headers: { Authorization: `Bearer ${token}`, "Parle-Version": version2, Connection: "close" },
+      headers: { Authorization: `Bearer ${token}`, "Parle-Agent-Session": sessionCredential, "Parle-Version": version2, Connection: "close" },
       signal: controller.signal
     });
     const raw = await response.text();
-    const withoutExactToken = raw.split(token).join("<redacted>");
+    const withoutSecrets = raw.split(token).join("<redacted>").split(sessionCredential).join("<redacted>");
     await new Promise((resolve) => process.stdout.write(`${response.status}
-${redactString(withoutExactToken)}`, () => resolve()));
+${redactString(withoutSecrets)}`, () => resolve()));
   } catch {
     await new Promise((resolve) => process.stdout.write("000\n{}", () => resolve()));
   } finally {
