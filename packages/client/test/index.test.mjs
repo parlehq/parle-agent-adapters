@@ -19,6 +19,7 @@ import {
   compactServerWrappedContent,
   parseKeyValueFile,
   parseSSEBlocks,
+  performProfileSwitch,
   redactedSecretValue,
   redactString,
   resolveConfig,
@@ -102,6 +103,54 @@ test("config resolves env before files and redacts tokens", () => {
   assert.equal(cfg.roomId?.value, "room-1");
   assert.equal(cfg.agentToken?.source, "env");
   assert.equal(redactString("Authorization: Bearer parle_agt_secret"), "Authorization: Bearer <redacted>");
+});
+
+test("profile switch orchestration keeps resolve and prepare failures before commit", async () => {
+  const calls = [];
+  await assert.rejects(() => performProfileSwitch({
+    resolve() { calls.push("resolve"); throw new Error("unknown profile"); },
+    async prepare() { calls.push("prepare"); return {}; },
+    commit() { calls.push("commit"); },
+    retireOldSession() { calls.push("retire"); },
+  }), /unknown profile/);
+  assert.deepEqual(calls, ["resolve"]);
+
+  calls.length = 0;
+  await assert.rejects(() => performProfileSwitch({
+    resolve() { calls.push("resolve"); return { profile: "target", roomId: "room-2", changed: true }; },
+    async prepare() { calls.push("prepare"); throw new Error("target unavailable"); },
+    commit() { calls.push("commit"); },
+    retireOldSession() { calls.push("retire"); },
+  }), /target unavailable/);
+  assert.deepEqual(calls, ["resolve", "prepare"]);
+});
+
+test("profile switch orchestration commits once and isolates post-commit cleanup failures", async () => {
+  const calls = [];
+  const prepared = { session: "opaque" };
+  const agentSecret = "parle_agt_" + "x".repeat(43);
+  const sessionSecret = "parle_ses_" + "y".repeat(43);
+  const result = await performProfileSwitch({
+    resolve() { calls.push("resolve"); return { profile: "target", roomId: "room-2", changed: true }; },
+    async prepare() { calls.push("prepare"); return prepared; },
+    commit(value) { calls.push("commit"); assert.equal(value, prepared); },
+    async restartWatcher() { calls.push("restart"); throw new Error(`watcher token ${agentSecret}`); },
+    async retireOldSession() { calls.push("retire"); throw new Error(`old session ${sessionSecret}`); },
+  });
+  assert.deepEqual(calls, ["resolve", "prepare", "commit", "retire", "restart"]);
+  assert.equal(result.switched, true);
+  assert.equal(result.watcherRestarted, false);
+  assert.equal(result.warnings.length, 2);
+  assert.equal(JSON.stringify(result).includes(agentSecret), false);
+  assert.equal(JSON.stringify(result).includes(sessionSecret), false);
+
+  const noOp = await performProfileSwitch({
+    resolve() { return { profile: "target", roomId: "room-2", changed: false }; },
+    async prepare() { throw new Error("must not prepare"); },
+    commit() { throw new Error("must not commit"); },
+    retireOldSession() { throw new Error("must not retire"); },
+  });
+  assert.deepEqual(noOp, { switched: false, profile: "target", roomId: "room-2", reason: "already_active", watcherRestarted: false, warnings: [] });
 });
 
 test("PARLE_VERSION is adapter-owned unless explicitly set in process env", () => {

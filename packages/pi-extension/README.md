@@ -109,6 +109,7 @@ whether a named route is needed.
 The extension registers these Pi tools:
 
 - `parle_status` - show redacted config provenance and runtime state.
+- `parle_switch_profile` - atomically switch this live Pi process to another named profile without editing `.env` or persistent configuration.
 - `parle_setup` - diagnose missing configuration.
 - `parle_login` - request and complete email login, capture the human session cookie, mint a room-bound agent token, and save a named personal profile. Pass `force: true` only when intentionally replacing that profile.
 - `parle_create_room` - create one private or shared room through the fixed human-session endpoint.
@@ -119,6 +120,8 @@ The extension registers these Pi tools:
 - `parle_inbox` - read the self-excluding inbound attention surface.
 - `parle_affordances` - list advisory room actions.
 - `parle_send` - send a raw Parle-native room message.
+
+Profile switches are ephemeral. `parle_switch_profile` validates and prepares the target before replacing live state, resets cross-room cursor and delivery state, restarts Pi's in-process watcher, and retires the old session best-effort. A cold restart returns to configured `PARLE_PROFILE` or the implicit default profile.
 
 `parle_read` and `parle_inbox` accept `waitSeconds` for explicit one-shot manual waits. Do not use `waitSeconds` to build a watcher loop.
 

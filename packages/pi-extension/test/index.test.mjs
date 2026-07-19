@@ -15,10 +15,12 @@ function installHarness(cwd) {
   __testing.resetRuntime();
   const tools = {};
   const commands = {};
+  const injected = [];
   const pi = {
     on() {},
     registerCommand(name, spec) { commands[name] = spec; },
     registerTool(spec) { tools[spec.name] = spec; },
+    sendUserMessage(message) { injected.push(message); },
   };
   mod.default(pi);
   const statuses = [];
@@ -27,6 +29,8 @@ function installHarness(cwd) {
     tools,
     commands,
     statuses,
+    injected,
+    pi,
     ctx,
     cwd,
     call(name, params = {}) {
@@ -197,7 +201,7 @@ test("status publishes a display-safe runtime snapshot", async () => {
   assert.equal(snapshot.sessionAddress, "@p.a.raw-session");
   assert.equal(snapshot.roomId, "room-1");
   assert.equal(snapshot.roomHandle, "galexc-intercom");
-  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.19" });
+  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.20" });
   assert.equal(JSON.stringify(snapshot).includes("parle_ses_raw-session"), false);
 });
 
@@ -245,6 +249,132 @@ test("parle_session_alias moves runtime without persistent config", async () => 
   assert.equal(result.details.generation, 3);
   assert.equal(__testing.resolveConfig(cwd).sessionAlias.value, "");
   assert.equal(harness.statuses.at(-1).label, "parle ✓ @p.a.parle-landing");
+});
+
+test("parle_switch_profile prepares the target before atomically replacing room state", async () => {
+  const cwd = tempProject("PARLE_WATCH_ENABLED=0\n");
+  const catalogDir = join(process.env.HOME, ".parle");
+  mkdirSync(catalogDir, { recursive: true });
+  const oldRoom = "019f2946-aef5-77ad-a41d-747ce0fd6a1e";
+  const newRoom = "019f7b46-178f-7a5a-9f7b-b4af2e045261";
+  writeFileSync(join(catalogDir, "profiles"), `[default]\nroom_id = ${oldRoom}\nagent_token = parle_agt_old\n\n[target]\nroom_id = ${newRoom}\nagent_token = parle_agt_target\n`, { mode: 0o600 });
+  const order = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    const auth = init.headers?.Authorization;
+    if (u.endsWith("/v/agent/sessions") && auth === "Bearer parle_agt_old") {
+      order.push("old-session");
+      return new Response(JSON.stringify({ agent_session_id: "as-old", session_credential: "parle_ses_old", session_handle: "old", expires_at: "later", address: "@p.a.old" }), { status: 201 });
+    }
+    if (u.endsWith("/v/agent/sessions") && auth === "Bearer parle_agt_target") {
+      order.push("target-session");
+      return new Response(JSON.stringify({ agent_session_id: "as-target", session_credential: "parle_ses_target", session_handle: "target", expires_at: "later", address: "@p.a.target" }), { status: 201 });
+    }
+    if (u.endsWith(`/v/rooms/${oldRoom}/participants`)) return new Response(JSON.stringify({ participant_id: "part-old" }), { status: 201 });
+    if (u.endsWith(`/v/rooms/${newRoom}/participants`)) return new Response(JSON.stringify({ participant_id: "part-target" }), { status: 201 });
+    if (u.includes(`/v/rooms/${oldRoom}/inbound`)) return new Response(JSON.stringify({ watermark: 7, messages: [{ seq: 7, event_id: "same-event", participant_id: "old-peer", content: "old room" }] }), { status: 200 });
+    if (u.includes(`/v/rooms/${oldRoom}/projection`)) return new Response(JSON.stringify({ watermark: 5, messages: [] }), { status: 200 });
+    if (u.includes(`/v/rooms/${newRoom}/projection`)) {
+      order.push("target-ready");
+      return new Response(JSON.stringify({ watermark: 42, messages: [] }), { status: 200 });
+    }
+    if (u.endsWith(`/v/rooms/${newRoom}/affordances`)) return new Response(JSON.stringify({ affordances: [{ action: "post_message", allowed: true }] }), { status: 200 });
+    if (u.includes(`/v/rooms/${newRoom}/responsive-delivery?`)) return new Response(JSON.stringify({ watermark: 42, messages: [{ seq: 7, event_id: "same-event", participant_id: "new-peer", provenance_author: "new-peer", provenance_kind: "participant", content: "new room" }] }), { status: 200 });
+    if (u.endsWith(`/v/rooms/${newRoom}/responsive-delivery/ack`)) return new Response(JSON.stringify({ acked: true }), { status: 200 });
+    if (u.endsWith("/v/agent/sessions/as-old/end")) {
+      order.push("old-ended");
+      assert.equal(auth, "Bearer parle_agt_old");
+      assert.equal(init.headers["Parle-Agent-Session"], "parle_ses_old");
+      return new Response(JSON.stringify({ ended: true }), { status: 200 });
+    }
+    throw new Error(`unexpected ${u} ${auth}`);
+  };
+  const harness = installHarness(cwd);
+  await harness.call("parle_status");
+  await harness.call("parle_inbox");
+
+  const switched = await harness.call("parle_switch_profile", { profile: "target" });
+
+  assert.equal(switched.details.switched, true);
+  assert.equal(switched.details.profile, "target");
+  assert.equal(switched.details.roomId, newRoom);
+  assert.equal(switched.details.cursor, 42);
+  assert.equal(switched.details.sessionAddress, "@p.a.target");
+  assert.equal(switched.details.ephemeral, true);
+  assert.ok(order.indexOf("target-ready") < order.indexOf("old-ended"));
+  const status = await harness.call("parle_status");
+  assert.equal(status.details.profile.value, "target");
+  assert.equal(status.details.profile.source, "runtime_profile");
+  assert.equal(status.details.roomId.value, newRoom);
+  assert.equal(status.details.runtime.roomId, newRoom);
+  const affordances = await harness.call("parle_affordances");
+  assert.equal(affordances.details.affordances[0].action, "post_message");
+  await __testing.handleWakeHint(harness.pi, harness.ctx, __testing.resolveConfig(cwd));
+  assert.equal(harness.injected.length, 1, "same seq/event from old room must not suppress target-room delivery");
+  assert.match(JSON.stringify(harness.injected[0]), /new room/);
+  assert.equal(readFileSync(join(cwd, ".env"), "utf8"), "PARLE_WATCH_ENABLED=0\n");
+});
+
+test("live Pi binding refuses naive PARLE_PROFILE edits until parle_switch_profile runs", async () => {
+  const cwd = tempProject("PARLE_WATCH_ENABLED=0\n");
+  const catalogDir = join(process.env.HOME, ".parle");
+  mkdirSync(catalogDir, { recursive: true });
+  const oldRoom = "019f2946-aef5-77ad-a41d-747ce0fd6a1e";
+  const newRoom = "019f7b46-178f-7a5a-9f7b-b4af2e045261";
+  writeFileSync(join(catalogDir, "profiles"), `[default]\nroom_id = ${oldRoom}\nagent_token = parle_agt_old\n\n[target]\nroom_id = ${newRoom}\nagent_token = parle_agt_target\n`, { mode: 0o600 });
+  let targetCalled = false;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    const auth = init.headers?.Authorization;
+    if (auth === "Bearer parle_agt_target") targetCalled = true;
+    if (u.endsWith("/v/agent/sessions")) return new Response(JSON.stringify({ agent_session_id: "as-old", session_credential: "parle_ses_old", expires_at: "later", address: "@p.a.old" }), { status: 201 });
+    if (u.endsWith(`/v/rooms/${oldRoom}/participants`)) return new Response(JSON.stringify({ participant_id: "part-old" }), { status: 201 });
+    if (u.includes(`/v/rooms/${oldRoom}/projection`)) return new Response(JSON.stringify({ watermark: 5, messages: [] }), { status: 200 });
+    throw new Error(`unexpected ${u} ${auth}`);
+  };
+  const harness = installHarness(cwd);
+  await harness.call("parle_status");
+  writeFileSync(join(cwd, ".env"), "PARLE_PROFILE=target\nPARLE_WATCH_ENABLED=0\n");
+
+  const status = await harness.call("parle_status");
+  assert.equal(status.details.profile.value, "default");
+  assert.equal(status.details.roomId.value, oldRoom);
+  assert.match(status.details.warnings.join("\n"), /use parle_switch_profile/);
+  await assert.rejects(harness.call("parle_affordances"), /Use parle_switch_profile/);
+  assert.equal(targetCalled, false);
+});
+
+test("parle_switch_profile leaves the live profile intact when target preparation fails", async () => {
+  const cwd = tempProject("PARLE_WATCH_ENABLED=0\n");
+  const catalogDir = join(process.env.HOME, ".parle");
+  mkdirSync(catalogDir, { recursive: true });
+  const oldRoom = "019f2946-aef5-77ad-a41d-747ce0fd6a1e";
+  const badRoom = "019f7b46-178f-7a5a-9f7b-b4af2e045261";
+  writeFileSync(join(catalogDir, "profiles"), `[default]\nroom_id = ${oldRoom}\nagent_token = parle_agt_old\n\n[bad]\nroom_id = ${badRoom}\nagent_token = parle_agt_bad\n`, { mode: 0o600 });
+  let oldEnded = false;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    const auth = init.headers?.Authorization;
+    if (u.endsWith("/v/agent/sessions") && auth === "Bearer parle_agt_old") return new Response(JSON.stringify({ agent_session_id: "as-old", session_credential: "parle_ses_old", expires_at: "later", address: "@p.a.old" }), { status: 201 });
+    if (u.endsWith("/v/agent/sessions") && auth === "Bearer parle_agt_bad") return new Response(JSON.stringify({ agent_session_id: "as-bad", session_credential: "parle_ses_bad", expires_at: "later", address: "@p.a.bad" }), { status: 201 });
+    if (u.endsWith(`/v/rooms/${oldRoom}/participants`)) return new Response(JSON.stringify({ participant_id: "part-old" }), { status: 201 });
+    if (u.endsWith(`/v/rooms/${badRoom}/participants`)) return new Response(JSON.stringify({ error: { message: "not admitted" } }), { status: 404 });
+    if (u.includes(`/v/rooms/${oldRoom}/projection`)) return new Response(JSON.stringify({ watermark: 5, messages: [] }), { status: 200 });
+    if (u.endsWith("/v/agent/sessions/as-bad/end")) return new Response(JSON.stringify({ ended: true }), { status: 200 });
+    if (u.endsWith("/v/agent/sessions/as-old/end")) { oldEnded = true; return new Response(JSON.stringify({ ended: true }), { status: 200 }); }
+    throw new Error(`unexpected ${u} ${auth}`);
+  };
+  const harness = installHarness(cwd);
+  await harness.call("parle_status");
+
+  await assert.rejects(harness.call("parle_switch_profile", { profile: "bad" }), /not admitted/);
+
+  assert.equal(oldEnded, false);
+  const status = await harness.call("parle_status");
+  assert.equal(status.details.profile.value, "default");
+  assert.equal(status.details.roomId.value, oldRoom);
+  assert.equal(status.details.runtime.roomId, oldRoom);
+  assert.equal(status.details.runtime.sessionAddress, "@p.a.old");
 });
 
 test("status starts watcher after late lazy bootstrap", async () => {

@@ -2,10 +2,10 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { DEFAULT_API_BASE, DEFAULT_VERSION, catalogGitExposureWarning, loadProfile, formatVersionErrorHint, parseKeyValueFile, parseProfiles, profileCatalogHasProfile, redactString, resolveProfileCatalogPath, summarizeSendDelivery, type CredentialProfile } from "@parlehq/agent-client";
+import { DEFAULT_API_BASE, DEFAULT_VERSION, catalogGitExposureWarning, loadProfile, formatVersionErrorHint, parseKeyValueFile, parseProfiles, performProfileSwitch, profileCatalogHasProfile, redactString, resolveProfileCatalogPath, summarizeSendDelivery, type CredentialProfile } from "@parlehq/agent-client";
 import { Type } from "typebox";
 const EXTENSION_ID = "25-parle";
-const PI_EXTENSION_VERSION = "0.1.19";
+const PI_EXTENSION_VERSION = "0.1.20";
 const RUNTIME_SCHEMA_VERSION = 1;
 const AI_GUIDANCE_URL = "https://ai.parle.sh";
 const API_LLMS_URL = "https://api.parle.sh/llms.txt";
@@ -25,7 +25,7 @@ const FOOTER_FAILURE_THRESHOLD = 3;
 const FOOTER_FAILURE_AGE_MS = 60_000;
 const INJECTED_KEY_LIMIT = 4096;
 
-type SourceKind = "env" | "project_env" | "session_file" | "profile_catalog" | `profile:${string}` | "default";
+type SourceKind = "env" | "project_env" | "runtime_profile" | "session_file" | "profile_catalog" | `profile:${string}` | "default";
 
 type ConfigValue = {
   value: string;
@@ -163,7 +163,13 @@ type ParleSessionAliasParams = {
   alias: string;
 };
 
+type ParleSwitchProfileParams = {
+  profile: string;
+};
+
 let runtime: RuntimeState = { bootstrapped: false, watcherState: "off" };
+let activeProfileOverride: string | undefined;
+let liveConfig: ParleConfig | undefined;
 let lastCtx: any | undefined;
 let watcherAbort: AbortController | undefined;
 let watcherLoopRunning = false;
@@ -178,6 +184,18 @@ let responsiveFlushRunning = false;
 
 function parseBoolEnabled(raw: string | undefined): boolean {
   return raw !== "0";
+}
+
+function sameRoomBinding(left: ParleConfig | undefined, right: ParleConfig | undefined): boolean {
+  if (!left || !right) return false;
+  return left.roomId?.value === right.roomId?.value
+    && left.agentToken?.value === right.agentToken?.value
+    && left.apiBase.value === right.apiBase.value
+    && left.wakeBase.value === right.wakeBase.value;
+}
+
+function configForLiveRuntime(resolved: ParleConfig): ParleConfig {
+  return runtime.bootstrapped && liveConfig ? liveConfig : resolved;
 }
 
 function readKeyValueFile(path: string): Record<string, string> {
@@ -198,7 +216,7 @@ function makeValue(value: string | undefined, source: SourceKind, key: string, s
   return { value, source, key, secret, warning };
 }
 
-function resolveConfig(cwd: string): ParleConfig {
+function resolveConfig(cwd: string, profileOverride = activeProfileOverride): ParleConfig {
   const projectEnv = readKeyValueFile(join(cwd, ".env"));
   const sourceCandidates = (key: string, secret = false): Array<ConfigValue | undefined> => [
     makeValue(process.env[key], "env", key, secret),
@@ -232,7 +250,9 @@ function resolveConfig(cwd: string): ParleConfig {
     const value = firstConfigValue(sourceCandidates(key, key === "PARLE_ROOM_AGENT_TOKEN"));
     return value ? [value] : [];
   });
-  const explicitProfile = firstConfigValue(sourceCandidates("PARLE_PROFILE"));
+  const explicitProfile = profileOverride
+    ? { value: profileOverride, source: "runtime_profile" as const, key: "PARLE_PROFILE" }
+    : firstConfigValue(sourceCandidates("PARLE_PROFILE"));
   // PARLE_PROFILES_PATH is a non-secret setting resolved like PARLE_PROFILE:
   // it names the catalog FILE and replaces the default path entirely (one
   // catalog per process, no layering). Relative paths resolve against cwd.
@@ -916,14 +936,14 @@ function parseJsonMaybe(text: string): any {
   try { return JSON.parse(text); } catch { return undefined; }
 }
 
-async function requestJson(cfg: ParleConfig, path: string, options: { method?: string; body?: unknown; session?: boolean; idempotencyKey?: string; signal?: AbortSignal; timeoutMs?: number } = {}) {
+async function requestJson(cfg: ParleConfig, path: string, options: { method?: string; body?: unknown; session?: boolean; idempotencyKey?: string; signal?: AbortSignal; timeoutMs?: number } = {}, state = runtime) {
   assertRuntimeConfig(cfg);
   const headers: Record<string, string> = {
     Accept: "application/json",
     "Parle-Version": cfg.version.value || DEFAULT_VERSION,
     Authorization: `Bearer ${cfg.agentToken!.value}`,
   };
-  if (options.session && runtime.sessionHandle) headers["Parle-Agent-Session"] = runtime.sessionHandle;
+  if (options.session && state.sessionHandle) headers["Parle-Agent-Session"] = state.sessionHandle;
   if (options.idempotencyKey) headers["Idempotency-Key"] = options.idempotencyKey;
   let body: string | undefined;
   if (options.body !== undefined) {
@@ -947,7 +967,7 @@ async function requestJson(cfg: ParleConfig, path: string, options: { method?: s
   }
   try {
     const response = await fetch(new URL(path, cfg.apiBase.value), { method: options.method || "GET", headers, body, signal });
-    runtime.lastHttpStatus = response.status;
+    state.lastHttpStatus = response.status;
     const text = await response.text();
     const json = parseJsonMaybe(text);
     if (!response.ok) {
@@ -1097,36 +1117,113 @@ function sessionRouteAddress(cfg: ParleConfig, session: any): string | null {
   return null;
 }
 
-async function bootstrap(ctx: any, cfg: ParleConfig, signal?: AbortSignal, preserveCursor = false, aliasOverride?: string) {
+async function bootstrap(ctx: any, cfg: ParleConfig, signal?: AbortSignal, preserveCursor = false, aliasOverride?: string, state = runtime, publish = true) {
   assertRuntimeConfig(cfg);
-  const previousCursor = runtime.cursor;
+  const previousCursor = state.cursor;
   const sessionBody: Record<string, string> = {};
   const alias = aliasOverride || cfg.sessionAlias?.value;
   if (alias) sessionBody.alias = alias;
-  const session = await requestJson(cfg, "/v/agent/sessions", { method: "POST", body: sessionBody, signal });
-  runtime.sessionHandle = String(session.session_credential || "");
-  runtime.sessionAlias = typeof session.alias === "string" && session.alias ? session.alias : alias;
-  runtime.sessionGeneration = typeof session.generation === "number" ? session.generation : undefined;
-  runtime.sessionAddress = sessionRouteAddress(cfg, session);
-  runtime.agentSessionId = String(session.agent_session_id || "");
-  runtime.expiresAt = String(session.expires_at || "");
-  runtime.roomId = cfg.roomId!.value;
-  const entry = await requestJson(cfg, `/v/rooms/${encodeURIComponent(cfg.roomId!.value)}/participants`, { method: "POST", session: true, signal });
-  runtime.participantId = String(entry.participant_id || "");
-  runtime.bootstrapped = true;
+  const session = await requestJson(cfg, "/v/agent/sessions", { method: "POST", body: sessionBody, signal }, state);
+  state.sessionHandle = String(session.session_credential || "");
+  state.sessionAlias = typeof session.alias === "string" && session.alias ? session.alias : alias;
+  state.sessionGeneration = typeof session.generation === "number" ? session.generation : undefined;
+  state.sessionAddress = sessionRouteAddress(cfg, session);
+  state.agentSessionId = String(session.agent_session_id || "");
+  state.expiresAt = String(session.expires_at || "");
+  state.roomId = cfg.roomId!.value;
+  const entry = await requestJson(cfg, `/v/rooms/${encodeURIComponent(cfg.roomId!.value)}/participants`, { method: "POST", session: true, signal }, state);
+  state.participantId = String(entry.participant_id || "");
+  state.bootstrapped = true;
   if (preserveCursor && typeof previousCursor === "number") {
-    runtime.cursor = previousCursor;
+    state.cursor = previousCursor;
   } else {
-    const projection = await requestJson(cfg, `/v/rooms/${encodeURIComponent(cfg.roomId!.value)}/projection?wait=0`, { session: true, signal });
-    runtime.cursor = typeof projection.watermark === "number" ? projection.watermark : 0;
+    const projection = await requestJson(cfg, `/v/rooms/${encodeURIComponent(cfg.roomId!.value)}/projection?wait=0`, { session: true, signal }, state);
+    state.cursor = typeof projection.watermark === "number" ? projection.watermark : 0;
   }
-  runtime.lastError = undefined;
-  setStatus(ctx, cfg);
-  publishRuntimeState(ctx, cfg);
+  state.lastError = undefined;
+  if (publish) {
+    if (state === runtime) liveConfig = cfg;
+    setStatus(ctx, cfg);
+    publishRuntimeState(ctx, cfg);
+  }
 }
 
 async function ensureBootstrapped(ctx: any, cfg: ParleConfig, signal?: AbortSignal) {
+  if (runtime.bootstrapped && runtime.roomId && runtime.roomId !== cfg.roomId?.value) {
+    throw new Error("Parle profile configuration changed while a room session is live. Use parle_switch_profile instead of editing PARLE_PROFILE or .env in place.");
+  }
   if (!runtime.bootstrapped || !runtime.sessionHandle) await bootstrap(ctx, cfg, signal);
+}
+
+function resetRoomScopedRuntime(next: RuntimeState) {
+  runtime = next;
+  injectedKeys.clear();
+  injectedKeyOrder.length = 0;
+  seenKeys.clear();
+  seenKeyOrder.length = 0;
+  clearPendingResponsiveMessages();
+}
+
+async function switchProfile(pi: any, ctx: any, profile: string, signal?: AbortSignal) {
+  assertProfileLabel(profile);
+  const cwd = ctx.cwd || process.cwd();
+  const previousCfg = configForLiveRuntime(resolveConfig(cwd));
+  const previousRuntime = { ...runtime };
+  const previousProfile = previousCfg.profile?.value;
+
+  const result = await performProfileSwitch({
+    resolve() {
+      const cfg = resolveConfig(cwd, profile);
+      assertRuntimeConfig(cfg);
+      const sameProfile = previousProfile === profile;
+      const sameBinding = sameRoomBinding(previousCfg, cfg);
+      const changed = !sameProfile || !sameBinding || !runtime.bootstrapped;
+      if (changed && pendingResponsiveMessages.length > 0) {
+        throw new Error("Parle profile switch is blocked while responsive messages are pending injection. Let the current turn settle, then retry.");
+      }
+      return { profile, roomId: cfg.roomId!.value, changed };
+    },
+    async prepare() {
+      const cfg = resolveConfig(cwd, profile);
+      const state: RuntimeState = { bootstrapped: false, watcherState: "off" };
+      try {
+        await bootstrap(ctx, cfg, signal, false, undefined, state, false);
+      } catch (error) {
+        await endAgentSession(cfg, undefined, state).catch(() => undefined);
+        throw error;
+      }
+      return { cfg, state };
+    },
+    commit(value) {
+      stopWatcher(ctx);
+      activeProfileOverride = profile;
+      liveConfig = value.cfg;
+      resetRoomScopedRuntime({ ...value.state, watcherState: "off", watcherStarted: false, watcherEnabled: parseBoolEnabled(value.cfg.watchEnabled.value) });
+      try { removeRuntimeFile(cwd); } catch {}
+      setStatus(ctx, value.cfg);
+      publishRuntimeState(ctx, value.cfg);
+    },
+    retireOldSession() {
+      return endAgentSession(previousCfg, signal, previousRuntime);
+    },
+    restartWatcher(value) {
+      startWatcher(pi, ctx, value.cfg);
+    },
+  });
+
+  return {
+    ...result,
+    previousProfile,
+    sessionAddress: runtime.sessionAddress,
+    agentSessionId: runtime.agentSessionId,
+    participantId: runtime.participantId,
+    expiresAt: runtime.expiresAt,
+    cursor: runtime.cursor,
+    ephemeral: true,
+    next: result.switched
+      ? "This profile selection lasts for the current Pi process only. Use parle_switch_profile to move again; a cold restart returns to configured PARLE_PROFILE/default selection."
+      : "The requested profile already owns the active room binding.",
+  };
 }
 
 function assertSessionAlias(alias: string) {
@@ -1184,10 +1281,10 @@ async function maybeHeartbeatAgentSession(ctx: any, cfg: ParleConfig, signal?: A
   await withRebootstrap(ctx, cfg, async () => heartbeatAgentSession(cfg, signal), signal);
 }
 
-async function endAgentSession(cfg: ParleConfig, signal?: AbortSignal) {
-  if (!runtime.agentSessionId || !runtime.sessionHandle || !cfg.enabled || !cfg.agentToken?.value) return;
-  await requestJson(cfg, `/v/agent/sessions/${encodeURIComponent(runtime.agentSessionId)}/end`, { method: "POST", session: true, signal });
-  runtime.lastEndSessionAt = new Date().toISOString();
+async function endAgentSession(cfg: ParleConfig, signal?: AbortSignal, state = runtime) {
+  if (!state.agentSessionId || !state.sessionHandle || !cfg.enabled || !cfg.agentToken?.value) return;
+  await requestJson(cfg, `/v/agent/sessions/${encodeURIComponent(state.agentSessionId)}/end`, { method: "POST", session: true, signal, timeoutMs: 2000 }, state);
+  state.lastEndSessionAt = new Date().toISOString();
 }
 
 function updateCursorFromMessages(current: number | undefined, messages: any[], watermark?: number): number | undefined {
@@ -1545,6 +1642,7 @@ async function runWatcher(pi: any, ctx: any, cfg: ParleConfig, signal: AbortSign
 }
 
 function startWatcher(pi: any, ctx: any, cfg = resolveConfig(ctx.cwd || process.cwd())) {
+  if (runtime.bootstrapped && runtime.roomId && runtime.roomId !== cfg.roomId?.value) return;
   if (!watcherConfigured(cfg)) return;
   if (watcherLoopRunning && watcherAbort && !watcherAbort.signal.aborted) return;
   watcherAbort?.abort();
@@ -1567,7 +1665,11 @@ function formatResult(details: any) {
 }
 
 function statusDetails(ctx: any) {
-  const cfg = resolveConfig(ctx.cwd || process.cwd());
+  const resolved = resolveConfig(ctx.cwd || process.cwd());
+  const cfg = configForLiveRuntime(resolved);
+  const bindingWarning = runtime.bootstrapped && !sameRoomBinding(resolved, cfg)
+    ? "Configured Parle profile changed while this room session was live. The active room remains unchanged; use parle_switch_profile to move safely."
+    : undefined;
   return {
     enabled: cfg.enabled,
     enabledInput: redactedValue(cfg.enabledInput),
@@ -1591,7 +1693,7 @@ function statusDetails(ctx: any) {
     sessionAlias: redactedValue(cfg.sessionAlias),
     watchEnabled: redactedValue(cfg.watchEnabled),
     profile: redactedValue(cfg.profile),
-    warnings: Array.from(new Set(cfg.warnings)),
+    warnings: Array.from(new Set([...cfg.warnings, ...(bindingWarning ? [bindingWarning] : [])])),
     runtime: {
       bootstrapped: runtime.bootstrapped,
       sessionAddress: runtime.sessionAddress,
@@ -1680,6 +1782,8 @@ export const __testing = {
   setStatus,
   resetRuntime() {
     runtime = { bootstrapped: false, watcherState: "off" };
+    activeProfileOverride = undefined;
+    liveConfig = undefined;
     injectedKeys.clear();
     injectedKeyOrder.length = 0;
     seenKeys.clear();
@@ -1718,7 +1822,7 @@ export default function parleExtension(pi: any) {
 
   pi.on("agent_settled", async (_event: any, ctx: any) => {
     lastCtx = ctx;
-    const cfg = resolveConfig(ctx.cwd || process.cwd());
+    const cfg = configForLiveRuntime(resolveConfig(ctx.cwd || process.cwd()));
     try {
       await flushPendingResponsiveMessages(pi, ctx, cfg);
     } catch (error: any) {
@@ -1728,7 +1832,7 @@ export default function parleExtension(pi: any) {
   });
 
   pi.on("session_shutdown", (_event: any, ctx: any) => {
-    const cfg = resolveConfig(ctx.cwd || process.cwd());
+    const cfg = configForLiveRuntime(resolveConfig(ctx.cwd || process.cwd()));
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 2000);
     void endAgentSession(cfg, controller.signal).catch((error) => {
@@ -1743,7 +1847,7 @@ export default function parleExtension(pi: any) {
     description: "Control the Parle responsive delivery watcher: status, start, or stop.",
     handler: async (args: string, ctx: any) => {
       lastCtx = ctx;
-      const cfg = resolveConfig(ctx.cwd || process.cwd());
+      const cfg = configForLiveRuntime(resolveConfig(ctx.cwd || process.cwd()));
       const action = (args || "status").trim().toLowerCase();
       if (action === "start") {
         startWatcher(pi, ctx, cfg);
@@ -1768,7 +1872,7 @@ export default function parleExtension(pi: any) {
     }),
     async execute(_id, params: ParleSessionAliasParams, signal, _update, ctx) {
       lastCtx = ctx;
-      const cfg = resolveConfig(ctx.cwd || process.cwd());
+      const cfg = configForLiveRuntime(resolveConfig(ctx.cwd || process.cwd()));
       const details = await useSessionAlias(pi, ctx, cfg, params.alias, signal);
       return formatResult(details);
     },
@@ -1781,7 +1885,7 @@ export default function parleExtension(pi: any) {
     parameters: Type.Object({}),
     async execute(_id, _params, signal, _update, ctx) {
       lastCtx = ctx;
-      const cfg = resolveConfig(ctx.cwd || process.cwd());
+      const cfg = configForLiveRuntime(resolveConfig(ctx.cwd || process.cwd()));
       if (cfg.enabled && cfg.roomId?.value && cfg.agentToken?.value && !runtime.bootstrapped) {
         try {
           await ensureBootstrapped(ctx, cfg, signal);
@@ -1790,9 +1894,22 @@ export default function parleExtension(pi: any) {
           publishRuntimeState(ctx, cfg);
         }
       }
-      startWatcher(pi, ctx, resolveConfig(ctx.cwd || process.cwd()));
+      startWatcher(pi, ctx, cfg);
       setStatus(ctx, cfg);
       return formatResult(statusDetails(ctx));
+    },
+  });
+
+  pi.registerTool({
+    name: "parle_switch_profile",
+    label: "Parle Switch Profile",
+    description: "Atomically move this live Pi process to another named Parle profile. The target is validated and bootstrapped on scratch state before the current room is quiesced; cross-room cursor and delivery state are reset, the old session is retired best-effort, and the in-process watcher is restarted. The selection is ephemeral and never edits .env or the profile catalog.",
+    parameters: Type.Object({
+      profile: Type.String({ description: "Named section in the resolved Parle profile catalog." }),
+    }),
+    async execute(_id, params: ParleSwitchProfileParams, signal, _update, ctx) {
+      lastCtx = ctx;
+      return formatResult(await switchProfile(pi, ctx, params.profile, signal));
     },
   });
 

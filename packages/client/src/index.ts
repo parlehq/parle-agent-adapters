@@ -134,6 +134,60 @@ export type ConnectionSummary = {
   next: string;
 };
 
+export type ProfileSwitchTarget = {
+  profile: string;
+  roomId: string;
+  changed: boolean;
+};
+
+export type ProfileSwitchPlan<Prepared> = {
+  resolve(): ProfileSwitchTarget;
+  prepare(target: ProfileSwitchTarget): Promise<Prepared>;
+  // Commit must synchronously stop use of the old binding, adopt Prepared,
+  // reset room-scoped cursor and dedup state, and publish one coherent state.
+  commit(prepared: Prepared, target: ProfileSwitchTarget): void;
+  retireOldSession(): Promise<void> | void;
+  restartWatcher?(prepared: Prepared, target: ProfileSwitchTarget): Promise<void> | void;
+};
+
+export type ProfileSwitchResult = {
+  switched: boolean;
+  profile: string;
+  roomId: string;
+  reason?: "already_active";
+  watcherRestarted: boolean;
+  warnings: string[];
+};
+
+// Profile switching is local adapter lifecycle, not Parle wire meaning. L1 owns
+// only the prepare-then-commit ordering and failure boundary; bridges keep their
+// credential-bearing bootstrap, runtime state, and watcher mechanics.
+export async function performProfileSwitch<Prepared>(plan: ProfileSwitchPlan<Prepared>): Promise<ProfileSwitchResult> {
+  const target = plan.resolve();
+  if (!target.changed) {
+    return { switched: false, profile: target.profile, roomId: target.roomId, reason: "already_active", watcherRestarted: false, warnings: [] };
+  }
+  const prepared = await plan.prepare(target);
+  plan.commit(prepared, target);
+
+  const warnings: string[] = [];
+  try {
+    await plan.retireOldSession();
+  } catch (error) {
+    warnings.push(`Profile switched, but the prior agent session could not be ended: ${redactString(error instanceof Error ? error.message : String(error))}`);
+  }
+  let watcherRestarted = false;
+  if (plan.restartWatcher) {
+    try {
+      await plan.restartWatcher(prepared, target);
+      watcherRestarted = true;
+    } catch (error) {
+      warnings.push(`Profile switched, but watcher restart failed: ${redactString(error instanceof Error ? error.message : String(error))}`);
+    }
+  }
+  return { switched: true, profile: target.profile, roomId: target.roomId, watcherRestarted, warnings };
+}
+
 export type SessionEstablishedBlock = {
   established: "this_call";
   sessionAddress: string | null;
