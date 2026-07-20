@@ -11,6 +11,7 @@
     "test": "pnpm -r test"
   },
   "devDependencies": {
+    "@parlehq/agent-client": "file:packages/client",
     "@types/node": "^26.1.0",
     "jiti": "^2.7.0",
     "typebox": "^1.0.0",

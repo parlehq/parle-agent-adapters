@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "bin": {
-    "parle-hardening-secret": "./dist/hardening-secret.js"
+    "parle-hardening-secret": "./bin/parle-hardening-secret.mjs"
   },
   "exports": {
     ".": {

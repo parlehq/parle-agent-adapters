@@ -4,6 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ParleHardeningClient } from "../dist/index.js";
 
 const PASSWORD = "SENTINEL_PASSWORD_518";
@@ -218,6 +219,20 @@ test("human-only helper refuses redirected stdin, secret argv and recording envi
     assert.notEqual(result.status, 0);
     assert.equal(text.includes(sentinel), false);
   }
+});
+
+test("documented source-checkout helper invocation resolves the reviewed entrypoint", () => {
+  const checkout = fileURLToPath(new URL("../../../", import.meta.url));
+  const guide = readFileSync(new URL("../../../docs/account-hardening-ceremony.md", import.meta.url), "utf8");
+  const documented = "pnpm exec parle-hardening-secret <command>";
+  assert.equal(guide.includes(documented), true);
+
+  const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+  const result = spawnSync(pnpm, ["exec", "parle-hardening-secret", "__resolve_check__"], { cwd: checkout, encoding: "utf8" });
+  const text = `${result.stdout || ""}${result.stderr || ""}`;
+  assert.equal(result.status, 2);
+  assert.match(text, /parle-hardening-secret could not complete safely/);
+  assert.doesNotMatch(text, /command not found|MODULE_NOT_FOUND|ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL/);
 });
 
 test("expired sudo refreshes without repeating the password mutation", async () => {

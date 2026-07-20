@@ -12,6 +12,9 @@ importers:
         specifier: '>=0.80.4 <0.81.0'
         version: 0.80.5(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.0)(zod@4.4.3)
     devDependencies:
+      '@parlehq/agent-client':
+        specifier: file:packages/client
+        version: link:packages/client
       '@types/node':
         specifier: ^26.1.0
         version: 26.1.0
