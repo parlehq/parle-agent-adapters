@@ -9,7 +9,7 @@ For the initial administrator ceremony, use a clean `parle-adapters` checkout at
 ## Procedure
 
 1. Run `parle_harden_account` with `action: "status"`.
-2. In the separate terminal, run `pnpm exec parle-hardening-secret password`. Select `set` or `change`; all password prompts have disabled echo.
+2. In the separate terminal, run `pnpm exec parle-hardening-secret password-set` for a new password, or `pnpm exec parle-hardening-secret password-change` when replacing an existing password. The helper begins directly with hidden password prompts.
 3. Run `parle_harden_account` with `action: "prepare"`, `confirmMutation: true`, and a reason.
 4. Run `parle_harden_account` with `action: "enroll_totp"`, explicit confirmation, then run `pnpm exec parle-hardening-secret show-provisioning-qr` and scan the displayed QR directly into the human authenticator.
 5. Run `pnpm exec parle-hardening-secret totp-code`, then `parle_harden_account` with `action: "confirm_totp"` and explicit confirmation. The recovery batch is written only to the protected local sink. It is never returned through the harness.

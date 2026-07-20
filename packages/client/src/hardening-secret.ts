@@ -2,7 +2,7 @@
 import qrcode from "qrcode-terminal";
 import { ParleHardeningClient } from "./hardening.js";
 
-const COMMANDS = new Set(["password", "bootstrap-proof", "totp-code", "show-provisioning-qr", "ack-recovery-stored"]);
+const COMMANDS = new Set(["password-set", "password-change", "bootstrap-proof", "totp-code", "show-provisioning-qr", "ack-recovery-stored"]);
 const RECORDING_ENV = ["ASCIINEMA_REC", "ASCIINEMA_CONFIG_HOME", "SCRIPT", "SCRIPT_COMMAND", "TMUX", "STY", "ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "TERMINAL_RECORDING", "RECORDING"];
 const SECRET_ENV = /(?:PASSWORD|SECRET|TOTP|OTP|RECOVERY|PROOF)/i;
 
@@ -65,11 +65,9 @@ async function hidden(question: string): Promise<Buffer> {
   return buffer;
 }
 
-async function password(client: ParleHardeningClient): Promise<void> {
-  const mode = (await prompt("Type set for a new password or change to replace one (input hidden; do not enter the password yet): ", true)).trim().toLowerCase();
-  if (mode !== "set" && mode !== "change") throw new Error("Password mode must be set or change.");
-  const next = await hidden("New password: ");
-  const repeat = await hidden("Repeat new password: ");
+async function password(client: ParleHardeningClient, mode: "set" | "change"): Promise<void> {
+  const next = await hidden(mode === "set" ? "Set password: " : "New password: ");
+  const repeat = await hidden("Repeat password: ");
   try {
     if (!next.equals(repeat)) throw new Error("Passwords did not match. Nothing was staged.");
     if (mode === "change") {
@@ -119,7 +117,8 @@ async function acknowledgeRecoveryStored(client: ParleHardeningClient): Promise<
 async function main(): Promise<void> {
   const command = rejectUnsafeInvocation();
   const client = new ParleHardeningClient();
-  if (command === "password") return password(client);
+  if (command === "password-set") return password(client, "set");
+  if (command === "password-change") return password(client, "change");
   if (command === "bootstrap-proof") return bootstrapProof(client);
   if (command === "totp-code") return totpCode(client);
   if (command === "show-provisioning-qr") return showProvisioningQr(client);
