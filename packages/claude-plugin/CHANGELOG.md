@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.5.24 (2026-07-19)
+
+Make human invitation-mint policy denials actionable with coarse, validated remediation hints while preserving no-retry behavior.
+
 ## 0.5.23 (2026-07-19)
 
 Link-first registered-principal invitations and guided agent connection.

@@ -11,6 +11,11 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const INVITE_SECRET_RE = /^parle_inv_\S{16,256}$/;
 const INVITE_CODE_RE = /^[A-Z0-9]{6,32}$/;
 const RESERVED_HANDLES = new Set(["admin", "agent", "agents", "api", "me", "null", "parle", "room", "rooms", "root", "support", "system", "www"]);
+const MINT_DENIAL_NEXT_ACTION = {
+  unhardened: "set a password, then enroll a second factor",
+  cooldown: "wait for the post-recovery cooldown to lapse",
+  account_restricted: "this account cannot expand its reach right now",
+} as const;
 
 export type AccountFetch = typeof fetch;
 
@@ -348,10 +353,18 @@ export class ParleAccountClient {
     const json = parseJson(text);
     if (!response.ok) {
       const error = json?.error && typeof json.error === "object" ? json.error : {};
-      const message = scrub(String(error.message || text || response.statusText), [config.sessionCookie, ...(options.secrets || [])]).slice(0, 4096);
+      const rawReason = typeof error.reason === "string" ? error.reason : "";
+      const expectedNextAction = MINT_DENIAL_NEXT_ACTION[rawReason as keyof typeof MINT_DENIAL_NEXT_ACTION];
+      const denialIsRecognized = Boolean(response.status === 403 && error.code === "forbidden" && expectedNextAction && error.unlock === expectedNextAction);
+      const baseMessage = scrub(String(error.message || text || response.statusText), [config.sessionCookie, ...(options.secrets || [])]).slice(0, 4096);
+      const message = denialIsRecognized ? `${baseMessage}. Reason: ${rawReason}. Next action: ${expectedNextAction}` : baseMessage;
       const raised: any = new Error(`Parle API ${response.status}: ${message}`);
       raised.status = response.status;
       raised.code = typeof error.code === "string" ? error.code : undefined;
+      if (denialIsRecognized) {
+        raised.reason = rawReason;
+        raised.nextAction = expectedNextAction;
+      }
       throw raised;
     }
     if (!json || typeof json !== "object") throw new Error("Parle API returned an invalid JSON response.");

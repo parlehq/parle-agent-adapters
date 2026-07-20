@@ -61,7 +61,7 @@ Next: open another session and send a message to this Session Address.
 
 ## Principal invitation workflow
 
-Use `parle_mint_principal_invite` only when the authenticated human owns or may invite into the target shared room. It requires the immutable registered target principal UUID plus a human-facing handle label and always mints an ordinary principal seat with no offered rights. The returned canonical locator is not a secret and can be shared through an ordinary out-of-band link. Possession grants no authority.
+Use `parle_mint_principal_invite` only when the authenticated human owns or may invite into the target shared room. It requires the immutable registered target principal UUID plus a human-facing handle label and always mints an ordinary principal seat with no offered rights. The returned canonical locator is not a secret and can be shared through an ordinary out-of-band link. Possession grants no authority. A definite human account-policy 403 may carry a coarse reason and next action. Follow that remediation and do not retry until the operator resolves it.
 
 The recipient uses `parle_accept_room_invitation` in this order:
 

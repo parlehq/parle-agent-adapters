@@ -44,6 +44,8 @@ Adapters never emulate this by generating and hiding a capability.
 
 It returns a server-authored canonical locator and safe admission facts. It rejects any target-session response containing secret or code material.
 
+A definite human account-policy 403 may include the core API's coarse `reason` and `unlock`. L1 accepts only the pinned safe pairs for `unhardened`, `cooldown`, and `account_restricted`, preserves them as structured error fields, and renders an actionable scrubbed message for harnesses. It never retries the mutation. Unknown or mismatched hints are ignored rather than reflected into model-visible output.
+
 ### Accept
 
 `parle_accept_room_invitation` accepts either an invitation UUID or a canonical locator.
@@ -91,6 +93,7 @@ Generic human-session HTTP remains prohibited.
 8. Ambiguous token mint outcomes stop safely without retry.
 9. Pi and MCP derive behavior from one shared L1 implementation.
 10. Legacy private capability claims remain isolated in `parle_claim_principal_invite`.
+11. Human invitation denials expose only the pinned coarse remediation vocabulary, never raw policy reasons or server-supplied arbitrary text.
 
 ## Validation
 

@@ -214,6 +214,11 @@ var UUID_RE2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9
 var INVITE_SECRET_RE = /^parle_inv_\S{16,256}$/;
 var INVITE_CODE_RE = /^[A-Z0-9]{6,32}$/;
 var RESERVED_HANDLES = /* @__PURE__ */ new Set(["admin", "agent", "agents", "api", "me", "null", "parle", "room", "rooms", "root", "support", "system", "www"]);
+var MINT_DENIAL_NEXT_ACTION = {
+  unhardened: "set a password, then enroll a second factor",
+  cooldown: "wait for the post-recovery cooldown to lapse",
+  account_restricted: "this account cannot expand its reach right now"
+};
 function parseDotEnv(text) {
   const values = {};
   for (const raw of text.split(/\r?\n/)) {
@@ -516,10 +521,18 @@ var ParleAccountClient = class {
     const json = parseJson(text);
     if (!response.ok) {
       const error = json?.error && typeof json.error === "object" ? json.error : {};
-      const message = scrub(String(error.message || text || response.statusText), [config.sessionCookie, ...options.secrets || []]).slice(0, 4096);
+      const rawReason = typeof error.reason === "string" ? error.reason : "";
+      const expectedNextAction = MINT_DENIAL_NEXT_ACTION[rawReason];
+      const denialIsRecognized = Boolean(response.status === 403 && error.code === "forbidden" && expectedNextAction && error.unlock === expectedNextAction);
+      const baseMessage = scrub(String(error.message || text || response.statusText), [config.sessionCookie, ...options.secrets || []]).slice(0, 4096);
+      const message = denialIsRecognized ? `${baseMessage}. Reason: ${rawReason}. Next action: ${expectedNextAction}` : baseMessage;
       const raised = new Error(`Parle API ${response.status}: ${message}`);
       raised.status = response.status;
       raised.code = typeof error.code === "string" ? error.code : void 0;
+      if (denialIsRecognized) {
+        raised.reason = rawReason;
+        raised.nextAction = expectedNextAction;
+      }
       throw raised;
     }
     if (!json || typeof json !== "object")
@@ -1044,7 +1057,7 @@ function summarizeSendDelivery(details) {
 // src/index.ts
 import { Type } from "typebox";
 var EXTENSION_ID = "25-parle";
-var PI_EXTENSION_VERSION = "0.1.24";
+var PI_EXTENSION_VERSION = "0.1.25";
 var RUNTIME_SCHEMA_VERSION2 = 1;
 var AI_GUIDANCE_URL = "https://ai.parle.sh";
 var API_LLMS_URL = "https://api.parle.sh/llms.txt";
@@ -2787,7 +2800,7 @@ function parleExtension(pi) {
   pi.registerTool({
     name: "parle_mint_principal_invite",
     label: "Parle Mint Principal Invite",
-    description: "Mint one registered-principal ordinary-seat invitation through the fixed human-session room endpoint. The immutable principal UUID is authoritative and principalHandle is a confirmation label. Returns a non-secret canonical locator for out-of-band sharing; possession grants no authority.",
+    description: "Mint one registered-principal ordinary-seat invitation through the fixed human-session room endpoint. The immutable principal UUID is authoritative and principalHandle is a confirmation label. Returns a non-secret canonical locator for out-of-band sharing; possession grants no authority. A definite human account-policy 403 may include a coarse reason and next action; follow it and do not retry until the operator resolves it.",
     parameters: Type.Object({
       roomId: Type.String({ description: "Shared room UUID." }),
       principalId: Type.String({ description: "Immutable UUID of the principal being invited." }),

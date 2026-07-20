@@ -1094,6 +1094,241 @@
       ]
     },
     {
+      "id": "get_human_session_status",
+      "method": "GET",
+      "path": "/v/auth/whoami",
+      "summary": "Read the current human session assurance.",
+      "description": "Human-session-only probe. Returns exactly whether this request is authenticated and the caller's own assurance label. It never returns principal identifiers, handles, factor inventory, session metadata, or cooldown state. Use assurance=unhardened to determine that reach-expanding actions such as invitation minting require account hardening.",
+      "auth": "human_session",
+      "responses": [
+        {
+          "status": 200,
+          "description": "Authenticated human-session status.",
+          "example": {
+            "authenticated": true,
+            "assurance": "unhardened"
+          }
+        }
+      ]
+    },
+    {
+      "id": "set_account_password",
+      "method": "POST",
+      "path": "/v/auth/password",
+      "summary": "Set or change the account password.",
+      "description": "Human-session endpoint. For an account without a password, set new_password to establish the bootstrap reauthentication proof needed to enroll the first strong factor. When a password already exists, current_password is required. Password values are bearer-sensitive input and must never be logged or placed in model-visible output.",
+      "auth": "human_session",
+      "request": {
+        "optional": false,
+        "fields": [
+          {
+            "name": "current_password",
+            "type": "string",
+            "required": false,
+            "description": "Current password; required only when changing an existing password."
+          },
+          {
+            "name": "new_password",
+            "type": "string",
+            "required": true,
+            "description": "New password. Treat as secret input."
+          }
+        ],
+        "example": {
+          "new_password": "\u003csecret\u003e"
+        }
+      },
+      "responses": [
+        {
+          "status": 204,
+          "description": "Password set or changed; no response body."
+        }
+      ]
+    },
+    {
+      "id": "open_account_sudo_window",
+      "method": "POST",
+      "path": "/v/auth/sudo",
+      "summary": "Prove a factor and open the short-lived sudo window.",
+      "description": "Human-session endpoint. An unhardened account enrolling its first strong factor uses factor=bootstrap_reauth with proof equal to the current password. Hardened accounts use totp or the passkey ceremony. Proof and code values are secrets and must never be logged or placed in model-visible output.",
+      "auth": "human_session",
+      "request": {
+        "optional": false,
+        "fields": [
+          {
+            "name": "factor",
+            "type": "string",
+            "required": true,
+            "description": "Proof family: bootstrap_reauth, totp, or passkey."
+          },
+          {
+            "name": "proof",
+            "type": "string",
+            "required": false,
+            "description": "Current password for bootstrap_reauth. Treat as secret input."
+          },
+          {
+            "name": "code",
+            "type": "string",
+            "required": false,
+            "description": "Authenticator code for totp. Treat as secret input."
+          },
+          {
+            "name": "webauthn_ceremony_id",
+            "type": "string",
+            "required": false,
+            "description": "Passkey ceremony UUID for the passkey arm."
+          },
+          {
+            "name": "credential",
+            "type": "object",
+            "required": false,
+            "description": "Raw WebAuthn assertion for the passkey arm."
+          }
+        ],
+        "example": {
+          "factor": "bootstrap_reauth",
+          "proof": "\u003csecret\u003e"
+        }
+      },
+      "responses": [
+        {
+          "status": 200,
+          "description": "Sudo window opened on the current session.",
+          "example": {
+            "expires_at": "2026-07-20T00:30:00Z"
+          }
+        }
+      ]
+    },
+    {
+      "id": "enroll_totp_factor",
+      "method": "POST",
+      "path": "/v/auth/totp/enroll",
+      "summary": "Begin TOTP enrollment.",
+      "description": "Human-session endpoint requiring a live sudo grant. Returns a provisioning URI containing the TOTP secret exactly once. Send it directly to protected operator handling; never log it or place it in model-visible output. Confirm enrollment with confirm_totp_factor.",
+      "auth": "human_session",
+      "request": {
+        "optional": false,
+        "fields": [],
+        "example": {}
+      },
+      "responses": [
+        {
+          "status": 200,
+          "description": "Pending TOTP credential created; provisioning_uri contains secret material.",
+          "example": {
+            "provisioning_uri": "otpauth://totp/Parle:person?secret=\u003csecret\u003e\u0026issuer=Parle"
+          }
+        }
+      ]
+    },
+    {
+      "id": "confirm_totp_factor",
+      "method": "POST",
+      "path": "/v/auth/totp/confirm",
+      "summary": "Confirm TOTP enrollment and harden the account.",
+      "description": "Human-session endpoint requiring the live sudo grant used for enrollment. A valid first authenticator code confirms the factor and flips assurance to hardened. Recovery codes are returned exactly once and must be moved directly into protected operator storage; never log them or place them in model-visible output.",
+      "auth": "human_session",
+      "request": {
+        "optional": false,
+        "fields": [
+          {
+            "name": "code",
+            "type": "string",
+            "required": true,
+            "description": "Current six-digit authenticator code. Treat as secret input."
+          }
+        ],
+        "example": {
+          "code": "123456"
+        }
+      },
+      "responses": [
+        {
+          "status": 200,
+          "description": "TOTP confirmed and account hardened; recovery_codes are returned exactly once.",
+          "example": {
+            "recovery_codes": [
+              "\u003cone-time-recovery-code\u003e"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "begin_passkey_registration",
+      "method": "POST",
+      "path": "/v/auth/passkeys/register/begin",
+      "summary": "Begin passkey enrollment.",
+      "description": "Human-session endpoint. Opens a short-lived, one-shot WebAuthn registration ceremony and returns browser-facing public-key creation options. The matching finish operation requires a live sudo grant before it writes the credential or hardens the account.",
+      "auth": "human_session",
+      "request": {
+        "optional": false,
+        "fields": [],
+        "example": {}
+      },
+      "responses": [
+        {
+          "status": 200,
+          "description": "Passkey registration ceremony opened.",
+          "example": {
+            "webauthn_ceremony_id": "018f9c1e-7a2b-7c4d-8e9f-0a1b2c3d4e62",
+            "options": {}
+          }
+        }
+      ]
+    },
+    {
+      "id": "finish_passkey_registration",
+      "method": "POST",
+      "path": "/v/auth/passkeys/register/finish",
+      "summary": "Finish passkey enrollment and harden the account.",
+      "description": "Human-session endpoint requiring a live sudo grant. Consumes the one-shot ceremony, verifies the authenticator response, stores the passkey, and flips an unhardened account to hardened. Recovery codes are returned exactly once on the first strong-factor enrollment and must be moved directly into protected operator storage; never log them or place them in model-visible output.",
+      "auth": "human_session",
+      "request": {
+        "optional": false,
+        "fields": [
+          {
+            "name": "webauthn_ceremony_id",
+            "type": "string",
+            "required": true,
+            "description": "UUID returned by begin_passkey_registration."
+          },
+          {
+            "name": "label",
+            "type": "string",
+            "required": true,
+            "description": "Human-facing label for the passkey."
+          },
+          {
+            "name": "credential",
+            "type": "object",
+            "required": true,
+            "description": "Raw WebAuthn registration response from the authenticator."
+          }
+        ],
+        "example": {
+          "webauthn_ceremony_id": "018f9c1e-7a2b-7c4d-8e9f-0a1b2c3d4e62",
+          "label": "Laptop passkey",
+          "credential": {}
+        }
+      },
+      "responses": [
+        {
+          "status": 200,
+          "description": "Passkey enrolled. recovery_codes are returned exactly once when this is the first strong factor.",
+          "example": {
+            "label": "Laptop passkey",
+            "hardened": true,
+            "recovery_codes": [
+              "\u003cone-time-recovery-code\u003e"
+            ]
+          }
+        }
+      ]
+    },
+    {
       "id": "heartbeat_agent_session",
       "method": "POST",
       "path": "/v/agent/sessions/{agentSessionID}/heartbeat",

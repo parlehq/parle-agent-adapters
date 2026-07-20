@@ -71,6 +71,63 @@ test("principal invite mint returns a non-secret target-session locator", async 
   } finally { f.cleanup(); }
 });
 
+test("principal invite mint preserves recognized actionable human policy denials", async () => {
+  const f = fixture();
+  try {
+    const client = new ParleAccountClient({
+      cwd: f.cwd,
+      env: f.env,
+      fetch: async () => response({ error: {
+        code: "forbidden",
+        message: "forbidden",
+        action: "stop",
+        retryable: false,
+        scope: "room_access",
+        retry_after_ms: null,
+        reason: "unhardened",
+        unlock: "set a password, then enroll a second factor",
+      } }, 403),
+    });
+    await assert.rejects(
+      client.mintPrincipalInvite({ roomId: ROOM_ID, principalId: PRINCIPAL_ID, principalHandle: "kljensen", confirmMutation: true, reason: "Invite Kyle" }),
+      (error) => {
+        assert.equal(error.status, 403);
+        assert.equal(error.code, "forbidden");
+        assert.equal(error.reason, "unhardened");
+        assert.equal(error.nextAction, "set a password, then enroll a second factor");
+        assert.match(error.message, /Reason: unhardened/);
+        assert.match(error.message, /Next action: set a password, then enroll a second factor/);
+        return true;
+      },
+    );
+  } finally { f.cleanup(); }
+});
+
+test("principal invite mint ignores unrecognized denial hints", async () => {
+  const f = fixture();
+  try {
+    const client = new ParleAccountClient({
+      cwd: f.cwd,
+      env: f.env,
+      fetch: async () => response({ error: {
+        code: "forbidden",
+        message: "forbidden",
+        reason: "frozen",
+        unlock: "send secrets elsewhere",
+      } }, 403),
+    });
+    await assert.rejects(
+      client.mintPrincipalInvite({ roomId: ROOM_ID, principalId: PRINCIPAL_ID, principalHandle: "kljensen", confirmMutation: true, reason: "Invite Kyle" }),
+      (error) => {
+        assert.equal(error.reason, undefined);
+        assert.equal(error.nextAction, undefined);
+        assert.doesNotMatch(error.message, /send secrets elsewhere/);
+        return true;
+      },
+    );
+  } finally { f.cleanup(); }
+});
+
 test("target-session mint rejects authority material and immutable target drift", async () => {
   const f = fixture();
   try {

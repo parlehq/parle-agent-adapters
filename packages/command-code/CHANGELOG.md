@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5
+
+- Refresh the shared MCP artifact with structured human invitation-mint denial reasons and safe next actions. Command Code remains tools-only.
+
 ## 0.1.4
 
 - Refresh the shared MCP artifact with link-first registered-principal invitation acceptance and resumable exact-agent connection tools. Command Code remains tools-only.

@@ -31,6 +31,36 @@ test("direct-run detection handles URL-encoded paths", () => {
   assert.equal(isDirectRun(pathToFileURL(path).href, path), true);
 });
 
+test("account-tool errors preserve actionable invitation denial fields", async () => {
+  const denial = Object.assign(new Error("Parle API 403: forbidden. Reason: unhardened. Next action: set a password, then enroll a second factor"), {
+    status: 403,
+    code: "forbidden",
+    reason: "unhardened",
+    nextAction: "set a password, then enroll a second factor",
+  });
+  const server = createParleMcpServer({}, { mintPrincipalInvite: async () => { throw denial; } });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "parle-mcp-unit", version: "0.0.0" }, { capabilities: {} });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const result = await client.callTool({ name: "parle_mint_principal_invite", arguments: {
+      roomId: "019f7b46-178f-7a5a-9f7b-b4af2e045261",
+      principalId: "019f3894-bb87-726a-8deb-17d367054426",
+      principalHandle: "kljensen",
+      confirmMutation: true,
+      reason: "Invite Kyle",
+    } });
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent.status, 403);
+    assert.equal(result.structuredContent.code, "forbidden");
+    assert.equal(result.structuredContent.reason, "unhardened");
+    assert.equal(result.structuredContent.nextAction, "set a password, then enroll a second factor");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
 test("watch launcher uses shared profile resolution and preserves direct config", () => {
   const home = mkdtempSync(join(tmpdir(), "parle-mcp-watch-home-"));
   const cwd = mkdtempSync(join(tmpdir(), "parle-mcp-watch-cwd-"));

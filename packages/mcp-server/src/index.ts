@@ -62,7 +62,7 @@ export type ParleAccountClientLike = {
 };
 
 export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgentClient(), accountClient: ParleAccountClientLike = new ParleAccountClient()) {
-  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.11" });
+  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.12" });
 
   server.registerTool("parle_status", {
     title: "Parle Status",
@@ -121,7 +121,7 @@ export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgent
 
   server.registerTool("parle_mint_principal_invite", {
     title: "Parle Mint Principal Invite",
-    description: "Mint one registered-principal ordinary-seat invitation through the fixed human-session endpoint. Returns a non-secret canonical locator for out-of-band sharing. Possession grants no authority; only the immutable target principal's authenticated session can preview or accept it.",
+    description: "Mint one registered-principal ordinary-seat invitation through the fixed human-session endpoint. Returns a non-secret canonical locator for out-of-band sharing. Possession grants no authority; only the immutable target principal's authenticated session can preview or accept it. A definite human account-policy 403 may include a coarse reason and nextAction; follow it and do not retry until the operator resolves it.",
     inputSchema: {
       roomId: z.string(),
       principalId: z.string(),
@@ -211,7 +211,7 @@ export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgent
 }
 
 export async function runStdio() {
-  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.11" } });
+  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.12" } });
   const server = createParleMcpServer(client);
   installLifecycleHandlers(client);
   await server.connect(new StdioServerTransport());
@@ -254,9 +254,17 @@ async function safeTool(fn: () => Promise<unknown>): Promise<any> {
   try {
     return toolResult(await fn());
   } catch (error: any) {
+    const accountFields = error && typeof error === "object"
+      ? {
+          ...(typeof error.code === "string" ? { code: error.code } : {}),
+          ...(typeof error.status === "number" ? { status: error.status } : {}),
+          ...(typeof error.reason === "string" ? { reason: error.reason } : {}),
+          ...(typeof error.nextAction === "string" ? { nextAction: error.nextAction } : {}),
+        }
+      : {};
     const payload = error instanceof ParleApiError
       ? { ok: false, error: error.message, code: error.code, status: error.status, action: error.action, scope: error.scope, retryable: error.retryable, retryAfterMs: error.retryAfterMs }
-      : { ok: false, error: error instanceof Error ? error.message : String(error) };
+      : { ok: false, error: error instanceof Error ? error.message : String(error), ...accountFields };
     return { ...toolResult(payload), isError: true };
   }
 }

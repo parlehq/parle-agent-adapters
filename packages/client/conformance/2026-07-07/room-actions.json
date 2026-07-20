@@ -457,7 +457,7 @@
       "method": "POST",
       "path": "/v/rooms/{roomID}/invites",
       "summary": "Mint an invite to a room.",
-      "description": "Mint a single-use room invitation. Capability mode returns secret + code; target_session mode returns only a non-secret locator for a registered immutable principal. You must be an active member. Two arms are gated on active membership of the path room. AGENT arm: a parle_agt_ agent bearer carrying the invite_mint scope; the room must also allow agent-minted invites, and the account must be hardened and out of any cooldown. HUMAN arm: a human login session may mint. A prt_ participant bearer is rejected on both arms. In capability mode the plaintext secret and code are returned exactly once. Target-session mode creates neither.\n\nLEGACY (non-seat_admission) room: byte-identical to the pre-#490 shape above — agents send NO body (the invite is unbound — an agent cannot prove a mailbox); a human may send an OPTIONAL {\"bound_email\": …} body to bind the invite to one mailbox. Any of the #490 fields below present on a legacy room is 422 validation_failed — a legacy room cannot mint a term-bearing invite.\n\nSHARED (#489/ADR-0065 seat_admission) room: the minter must additionally hold an active seat AND (be the room owner OR hold the invite_members right). The body REQUIRES seat_type (\"principal\"|\"agent\") and target ({kind:\"principal\"|\"agent\"|\"email\"|\"unbound\", plus principal_handle|principal_id, agent_handle|agent_id, or email as the kind requires} — handles are discovery-only and resolved HERE to immutable ids + a frozen display snapshot). agent_admission (\"direct\"|\"owner_approval\") is required for an EXACT-agent target only. claim_mode defaults to capability; target_session is valid only for an ordinary immutable principal-targeted principal seat and returns claim_url without ever creating secret/code material. offered_rights (non-default ADR-0066 rights) is OWNER-ONLY — 403 otherwise. ttl_seconds optionally overrides the 7-day default/hard max (422 if out of range). An unknown/foreign/revoked/deleted target is 422 validation_failed (one uniform envelope); an already-seated principal or exact-agent target is 409 already_member (a principal-targeted agent-seat target is NOT mint-blocked — another eligible agent may still claim it). The response echoes the minted immutable terms alongside either invite_id/secret/code or invite_id/claim_url, according to claim_mode.",
+      "description": "Mint a single-use room invitation. Capability mode returns secret + code; target_session mode returns only a non-secret locator for a registered immutable principal. You must be an active member. Two arms are gated on active membership of the path room. AGENT arm: a parle_agt_ agent bearer carrying the invite_mint scope; the room must also allow agent-minted invites, and the account must be hardened and out of any cooldown. HUMAN arm: a human login session may mint. After the human caller passes the room disclosure gate, an account-policy 403 adds a coarse reason (unhardened, cooldown, or account_restricted) and unlock; internal policy reasons remain server-only. A prt_ participant bearer is rejected on both arms. In capability mode the plaintext secret and code are returned exactly once. Target-session mode creates neither.\n\nLEGACY (non-seat_admission) room: byte-identical to the pre-#490 shape above — agents send NO body (the invite is unbound — an agent cannot prove a mailbox); a human may send an OPTIONAL {\"bound_email\": …} body to bind the invite to one mailbox. Any of the #490 fields below present on a legacy room is 422 validation_failed — a legacy room cannot mint a term-bearing invite.\n\nSHARED (#489/ADR-0065 seat_admission) room: the minter must additionally hold an active seat AND (be the room owner OR hold the invite_members right). The body REQUIRES seat_type (\"principal\"|\"agent\") and target ({kind:\"principal\"|\"agent\"|\"email\"|\"unbound\", plus principal_handle|principal_id, agent_handle|agent_id, or email as the kind requires} — handles are discovery-only and resolved HERE to immutable ids + a frozen display snapshot). agent_admission (\"direct\"|\"owner_approval\") is required for an EXACT-agent target only. claim_mode defaults to capability; target_session is valid only for an ordinary immutable principal-targeted principal seat and returns claim_url without ever creating secret/code material. offered_rights (non-default ADR-0066 rights) is OWNER-ONLY — 403 otherwise. ttl_seconds optionally overrides the 7-day default/hard max (422 if out of range). An unknown/foreign/revoked/deleted target is 422 validation_failed (one uniform envelope); an already-seated principal or exact-agent target is 409 already_member (a principal-targeted agent-seat target is NOT mint-blocked — another eligible agent may still claim it). The response echoes the minted immutable terms alongside either invite_id/secret/code or invite_id/claim_url, according to claim_mode.",
       "auth": "agent_or_session",
       "request": {
         "optional": true,
@@ -524,6 +524,22 @@
             "room_id": "018f9c1e-7a2b-7c4d-8e9f-0a1b2c3d4e5f",
             "secret": "parle_inv_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
             "code": "8N7C2V9XQS"
+          }
+        },
+        {
+          "status": 403,
+          "description": "Forbidden. A human-session account-policy denial includes only a coarse reason and unlock hint after room disclosure; agent and other authorization denials remain generic.",
+          "example": {
+            "error": {
+              "code": "forbidden",
+              "message": "forbidden",
+              "action": "stop",
+              "retryable": false,
+              "scope": "room_access",
+              "retry_after_ms": null,
+              "reason": "unhardened",
+              "unlock": "set a password, then enroll a second factor"
+            }
           }
         }
       ]

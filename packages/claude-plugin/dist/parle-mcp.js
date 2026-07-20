@@ -31258,6 +31258,11 @@ var UUID_RE2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9
 var INVITE_SECRET_RE = /^parle_inv_\S{16,256}$/;
 var INVITE_CODE_RE = /^[A-Z0-9]{6,32}$/;
 var RESERVED_HANDLES = /* @__PURE__ */ new Set(["admin", "agent", "agents", "api", "me", "null", "parle", "room", "rooms", "root", "support", "system", "www"]);
+var MINT_DENIAL_NEXT_ACTION = {
+  unhardened: "set a password, then enroll a second factor",
+  cooldown: "wait for the post-recovery cooldown to lapse",
+  account_restricted: "this account cannot expand its reach right now"
+};
 function parseDotEnv(text) {
   const values = {};
   for (const raw of text.split(/\r?\n/)) {
@@ -31560,10 +31565,18 @@ var ParleAccountClient = class {
     const json2 = parseJson(text);
     if (!response.ok) {
       const error51 = json2?.error && typeof json2.error === "object" ? json2.error : {};
-      const message = scrub(String(error51.message || text || response.statusText), [config2.sessionCookie, ...options.secrets || []]).slice(0, 4096);
+      const rawReason = typeof error51.reason === "string" ? error51.reason : "";
+      const expectedNextAction = MINT_DENIAL_NEXT_ACTION[rawReason];
+      const denialIsRecognized = Boolean(response.status === 403 && error51.code === "forbidden" && expectedNextAction && error51.unlock === expectedNextAction);
+      const baseMessage = scrub(String(error51.message || text || response.statusText), [config2.sessionCookie, ...options.secrets || []]).slice(0, 4096);
+      const message = denialIsRecognized ? `${baseMessage}. Reason: ${rawReason}. Next action: ${expectedNextAction}` : baseMessage;
       const raised = new Error(`Parle API ${response.status}: ${message}`);
       raised.status = response.status;
       raised.code = typeof error51.code === "string" ? error51.code : void 0;
+      if (denialIsRecognized) {
+        raised.reason = rawReason;
+        raised.nextAction = expectedNextAction;
+      }
       throw raised;
     }
     if (!json2 || typeof json2 !== "object")
@@ -33129,7 +33142,7 @@ var switchProfileSchema = {
   watcherStopped: external_exports.boolean()
 };
 function createParleMcpServer(client = new ParleAgentClient(), accountClient = new ParleAccountClient()) {
-  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.11" });
+  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.12" });
   server.registerTool("parle_status", {
     title: "Parle Status",
     description: "Show redacted Parle config provenance and runtime state. The result's compactText is the standard card for user-facing status: render it verbatim instead of paraphrasing; config and runtime are diagnostic detail. When configured and not yet connected, this auto-connects the session first (single-flight, backoff-aware); pass inspect:true for a passive read with no network side effects.",
@@ -33183,7 +33196,7 @@ function createParleMcpServer(client = new ParleAgentClient(), accountClient = n
   }));
   server.registerTool("parle_mint_principal_invite", {
     title: "Parle Mint Principal Invite",
-    description: "Mint one registered-principal ordinary-seat invitation through the fixed human-session endpoint. Returns a non-secret canonical locator for out-of-band sharing. Possession grants no authority; only the immutable target principal's authenticated session can preview or accept it.",
+    description: "Mint one registered-principal ordinary-seat invitation through the fixed human-session endpoint. Returns a non-secret canonical locator for out-of-band sharing. Possession grants no authority; only the immutable target principal's authenticated session can preview or accept it. A definite human account-policy 403 may include a coarse reason and nextAction; follow it and do not retry until the operator resolves it.",
     inputSchema: {
       roomId: external_exports.string(),
       principalId: external_exports.string(),
@@ -33263,7 +33276,7 @@ function createParleMcpServer(client = new ParleAgentClient(), accountClient = n
   return server;
 }
 async function runStdio() {
-  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.11" } });
+  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.12" } });
   const server = createParleMcpServer(client);
   installLifecycleHandlers(client);
   await server.connect(new StdioServerTransport());
@@ -33298,7 +33311,13 @@ async function safeTool(fn) {
   try {
     return toolResult(await fn());
   } catch (error51) {
-    const payload = error51 instanceof ParleApiError ? { ok: false, error: error51.message, code: error51.code, status: error51.status, action: error51.action, scope: error51.scope, retryable: error51.retryable, retryAfterMs: error51.retryAfterMs } : { ok: false, error: error51 instanceof Error ? error51.message : String(error51) };
+    const accountFields = error51 && typeof error51 === "object" ? {
+      ...typeof error51.code === "string" ? { code: error51.code } : {},
+      ...typeof error51.status === "number" ? { status: error51.status } : {},
+      ...typeof error51.reason === "string" ? { reason: error51.reason } : {},
+      ...typeof error51.nextAction === "string" ? { nextAction: error51.nextAction } : {}
+    } : {};
+    const payload = error51 instanceof ParleApiError ? { ok: false, error: error51.message, code: error51.code, status: error51.status, action: error51.action, scope: error51.scope, retryable: error51.retryable, retryAfterMs: error51.retryAfterMs } : { ok: false, error: error51 instanceof Error ? error51.message : String(error51), ...accountFields };
     return { ...toolResult(payload), isError: true };
   }
 }
