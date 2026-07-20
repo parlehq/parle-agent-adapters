@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.5.27 (2026-07-20)
+
+Clarify that each connection operation selects one durable agent and that `createAgentHandle` deliberately creates and connects an additional owned agent.
+
 ## 0.5.26 (2026-07-20)
 
 Make registered-principal invitation minting handle-first with server-side resolution and immutable binding and retain optional UUID pinning for high-assurance targets.

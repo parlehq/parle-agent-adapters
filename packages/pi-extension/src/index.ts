@@ -5,7 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { DEFAULT_API_BASE, DEFAULT_VERSION, ParleAccountClient, catalogGitExposureWarning, loadProfile, formatVersionErrorHint, parseKeyValueFile, parseProfiles, performProfileSwitch, profileCatalogHasProfile, redactString, resolveProfileCatalogPath, summarizeSendDelivery, type AcceptRoomInvitationParams, type ClaimPrincipalInviteParams, type ConnectOwnAgentParams, type CredentialProfile, type HardenAccountParams, type MintPrincipalInviteParams } from "@parlehq/agent-client";
 import { Type } from "typebox";
 const EXTENSION_ID = "25-parle";
-const PI_EXTENSION_VERSION = "0.1.27";
+const PI_EXTENSION_VERSION = "0.1.28";
 const RUNTIME_SCHEMA_VERSION = 1;
 const AI_GUIDANCE_URL = "https://ai.parle.sh";
 const API_LLMS_URL = "https://api.parle.sh/llms.txt";
@@ -2104,13 +2104,13 @@ export default function parleExtension(pi: any) {
   pi.registerTool({
     name: "parle_connect_own_agent",
     label: "Connect Own Agent to Parle Room",
-    description: "Preview or complete the separate post-acceptance workflow for exactly one owned durable agent. It resumes only missing seat, credential, and profile steps, never returns a token, and leaves profile switching to the host lifecycle.",
+    description: "Preview or complete a post-acceptance connection for one owned durable agent per operation. Select an existing agent or deliberately create an additional one. The workflow resumes only missing seat, credential, and profile steps, never returns a token, and leaves profile switching to the host lifecycle.",
     parameters: Type.Object({
       action: Type.Unsafe({ type: "string", enum: ["preview", "complete"] }),
       invitation: Type.String({ description: "Accepted invitation UUID or canonical Parle locator URL." }),
       agentId: Type.Optional(Type.String({ description: "Exact owned durable-agent UUID." })),
       agentHandle: Type.Optional(Type.String({ description: "Exact owned durable-agent handle." })),
-      createAgentHandle: Type.Optional(Type.String({ description: "Deliberate handle for a new durable agent when none is selected." })),
+      createAgentHandle: Type.Optional(Type.String({ description: "Deliberate handle for a new durable agent to create and connect instead of selecting an existing agent." })),
       profileLabel: Type.Optional(Type.String({ description: "Explicit unused local profile label when canonical choices conflict." })),
       confirmMutation: Type.Optional(Type.Boolean({ description: "Required true only for complete." })),
       reason: Type.Optional(Type.String({ description: "Required explanation only for complete." })),

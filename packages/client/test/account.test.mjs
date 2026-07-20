@@ -13,6 +13,8 @@ const SEAT_ID = "019f7c00-0000-7000-8000-000000000002";
 const PARTICIPANT_ID = "019f7c00-0000-7000-8000-000000000003";
 const AGENT_ID = "019f7c00-0000-7000-8000-000000000004";
 const AGENT_TOKEN_ID = "019f7c00-0000-7000-8000-000000000005";
+const ADDITIONAL_AGENT_ID = "019f7c00-0000-7000-8000-000000000006";
+const ADDITIONAL_AGENT_TOKEN_ID = "019f7c00-0000-7000-8000-000000000007";
 const SECRET = `parle_inv_${"z".repeat(43)}`;
 const CODE = "ABCDEFGHIJ";
 
@@ -278,6 +280,8 @@ test("target-session invitation preview and acceptance use only the configured c
     const accepted = await client.acceptRoomInvitation({ action: "accept", invitation: INVITE_ID, confirmMutation: true, reason: "accept" });
     assert.equal(accepted.principal, "accepted");
     assert.equal(accepted.agent, "needs_selection");
+    assert.match(accepted.next, /createAgentHandle/);
+    assert.match(accepted.next, /additional durable agent/);
     assert.deepEqual(calls.map((call) => call.url), [
       `http://127.0.0.1:8787/v/room-invitations/${INVITE_ID}`,
       `http://127.0.0.1:8787/v/room-invitations/${INVITE_ID}`,
@@ -305,6 +309,8 @@ test("connect workflow previews immutable selection and publishes a credential w
     const preview = await client.connectOwnAgent({ action: "preview", invitation: INVITE_ID });
     assert.equal(preview.selectedAgent.agentId, AGENT_ID);
     assert.equal(preview.agent, "selected");
+    assert.match(preview.next, /createAgentHandle/);
+    assert.match(preview.next, /new durable agent/);
     const complete = await client.connectOwnAgent({ action: "complete", invitation: INVITE_ID, agentId: AGENT_ID, confirmMutation: true, reason: "connect" });
     assert.equal(complete.profile, "galexc-kyleops");
     assert.equal(complete.credential, "profile_ready");
@@ -313,6 +319,46 @@ test("connect workflow previews immutable selection and publishes a credential w
     assert.match(catalog, /\[galexc-kyleops\]/);
     assert.match(catalog, /agent_token_id = 019f7c00-0000-7000-8000-000000000005/);
     assert.equal(paths.includes(`POST /v/rooms/${ROOM_ID}/seats`), true);
+  } finally { f.cleanup(); }
+});
+
+test("connect can deliberately create and connect an additional durable agent", async () => {
+  const f = fixture();
+  const profilesPath = join(f.home, ".parle", "profiles");
+  const existing = readFileSync(profilesPath, "utf8");
+  writeFileSync(profilesPath, `${existing}\n[galexc-kyleops]\nroom_id = ${ROOM_ID}\nagent_token = parle_agt_mortyfixture123456\nagent_token_id = ${AGENT_TOKEN_ID}\n`, { mode: 0o600 });
+  const calls = [];
+  try {
+    const client = new ParleAccountClient({ cwd: f.cwd, env: f.env, fetch: async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init.method || "GET";
+      const body = init.body ? JSON.parse(init.body) : undefined;
+      calls.push({ method, path, body });
+      if (path === `/v/room-invitations/${INVITE_ID}`) return response({ invite_id: INVITE_ID, state: "accepted", room_id: ROOM_ID, room_handle: "galexc-kyleops", inviter_principal_id: PRINCIPAL_ID, seat_type: "principal", offered_rights: [], history_visible: true, expires_at: "2026-07-26T20:00:00Z", accepted_at: "2026-07-19T20:00:00Z", principal_seat_active: true });
+      if (path === "/v/agents" && method === "GET") return response({ agents: [{ agent_id: AGENT_ID, agent_handle: "morty", display_name: "Morty" }] });
+      if (path === "/v/agents" && method === "POST") return response({ agent_id: ADDITIONAL_AGENT_ID, agent_handle: "rick", display_name: "rick" }, 201);
+      if (path === `/v/rooms/${ROOM_ID}`) return response({ roster: { agent_seats: [{ seat_id: "019f7c00-0000-7000-8000-000000000099", agent_id: AGENT_ID }] } });
+      if (path === `/v/rooms/${ROOM_ID}/seats`) return response({ seat_id: SEAT_ID, agent_id: ADDITIONAL_AGENT_ID }, 201);
+      if (path === `/v/agents/${ADDITIONAL_AGENT_ID}/tokens` && method === "GET") return response({ tokens: [] });
+      if (path === `/v/agents/${ADDITIONAL_AGENT_ID}/tokens` && method === "POST") return response({ agent_token_id: ADDITIONAL_AGENT_TOKEN_ID, agent_id: ADDITIONAL_AGENT_ID, room_id: ROOM_ID, token: `parle_agt_${"r".repeat(43)}` }, 201);
+      throw new Error(`unexpected ${method} ${path}`);
+    } });
+    const preview = await client.connectOwnAgent({ action: "preview", invitation: INVITE_ID, createAgentHandle: "rick" });
+    assert.equal(preview.proposedCreateHandle, "rick");
+    assert.equal(preview.selectedAgent, undefined);
+    assert.equal(preview.agents[0].agentHandle, "morty");
+    assert.match(preview.next, /additional-agent handle/);
+
+    const complete = await client.connectOwnAgent({ action: "complete", invitation: INVITE_ID, createAgentHandle: "rick", confirmMutation: true, reason: "Add a second durable agent" });
+    assert.equal(complete.agent, "created");
+    assert.equal(complete.selectedAgent.agentId, ADDITIONAL_AGENT_ID);
+    assert.equal(complete.profile, "galexc-kyleops-rick");
+    assert.match(complete.next, /add another durable agent/i);
+    assert.deepEqual(calls.find((call) => call.method === "POST" && call.path === "/v/agents")?.body, { agent_handle: "rick" });
+    assert.deepEqual(calls.find((call) => call.method === "POST" && call.path === `/v/rooms/${ROOM_ID}/seats`)?.body, { agent_id: ADDITIONAL_AGENT_ID });
+    const catalog = readFileSync(profilesPath, "utf8");
+    assert.match(catalog, /\[galexc-kyleops-rick\]/);
+    assert.equal(catalog.includes("parle_agt_mortyfixture123456"), true);
   } finally { f.cleanup(); }
 });
 

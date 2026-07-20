@@ -1693,7 +1693,7 @@ var ParleAccountClient = class {
       seat: "missing",
       credential: "missing",
       connection: "profile_ready",
-      next: "The direct principal seat is active and usable. Preview parle_connect_own_agent to select exactly one durable agent."
+      next: "The direct principal seat is active and usable. Preview parle_connect_own_agent to select one durable agent for this connection, or pass createAgentHandle to create and connect an additional durable agent."
     };
   }
   async connectOwnAgent(params, signal) {
@@ -1746,7 +1746,7 @@ var ParleAccountClient = class {
         seat: "missing",
         credential: "missing",
         connection: "host_restart_required",
-        next: agents.length === 0 ? "Choose an explicit createAgentHandle, then preview again." : "Choose one agentId or agentHandle, then preview again."
+        next: agents.length === 0 ? "Choose an explicit createAgentHandle, then preview again." : "Choose one agentId or agentHandle, or pass createAgentHandle to create and connect an additional durable agent, then preview again."
       };
     }
     if (params.action === "preview" && !selected) {
@@ -1762,7 +1762,7 @@ var ParleAccountClient = class {
         seat: "missing",
         credential: "missing",
         connection: "host_restart_required",
-        next: "Review the deliberate new-agent handle, then complete with explicit confirmation."
+        next: "Review the deliberate additional-agent handle, then complete with explicit confirmation."
       };
     }
     if (params.action === "preview" && selected) {
@@ -1788,7 +1788,7 @@ var ParleAccountClient = class {
         credential: compatible2 ? "profile_ready" : "missing",
         connection: compatible2 ? "profile_ready" : "host_restart_required",
         ...compatible2 ? { profile: compatible2.name } : {},
-        next: compatible2 ? "The exact agent already has a proven compatible profile. Confirm complete to return the ready binding without minting another credential." : "Review the immutable agent selection and missing steps, then complete with explicit confirmation."
+        next: compatible2 ? "The exact agent already has a proven compatible profile. Confirm complete to return the ready binding without minting another credential, or preview again with createAgentHandle to create and connect an additional durable agent." : "Review the immutable agent selection and missing steps, then complete with explicit confirmation. To create a new durable agent instead, preview again with createAgentHandle."
       };
     }
     let agentState = "selected";
@@ -1827,7 +1827,7 @@ var ParleAccountClient = class {
         credential: "profile_ready",
         connection: "profile_ready",
         profile: compatible.name,
-        next: "Use the host adapter's existing safe profile-switch lifecycle to connect."
+        next: "Use the host adapter's existing safe profile-switch lifecycle to connect. To add another durable agent, begin a new preview with createAgentHandle."
       };
     }
     const roomHandle = invitation.roomHandle;
@@ -1904,7 +1904,7 @@ var ParleAccountClient = class {
       credential: "profile_ready",
       connection: "profile_ready",
       profile: profileName,
-      next: "Use the host adapter's existing safe profile-switch lifecycle to connect."
+      next: "Use the host adapter's existing safe profile-switch lifecycle to connect. To add another durable agent, begin a new preview with createAgentHandle."
     };
   }
 };
@@ -1999,7 +1999,7 @@ function summarizeSendDelivery(details) {
 // src/index.ts
 import { Type } from "typebox";
 var EXTENSION_ID = "25-parle";
-var PI_EXTENSION_VERSION = "0.1.27";
+var PI_EXTENSION_VERSION = "0.1.28";
 var RUNTIME_SCHEMA_VERSION2 = 1;
 var AI_GUIDANCE_URL = "https://ai.parle.sh";
 var API_LLMS_URL = "https://api.parle.sh/llms.txt";
@@ -3803,13 +3803,13 @@ function parleExtension(pi) {
   pi.registerTool({
     name: "parle_connect_own_agent",
     label: "Connect Own Agent to Parle Room",
-    description: "Preview or complete the separate post-acceptance workflow for exactly one owned durable agent. It resumes only missing seat, credential, and profile steps, never returns a token, and leaves profile switching to the host lifecycle.",
+    description: "Preview or complete a post-acceptance connection for one owned durable agent per operation. Select an existing agent or deliberately create an additional one. The workflow resumes only missing seat, credential, and profile steps, never returns a token, and leaves profile switching to the host lifecycle.",
     parameters: Type.Object({
       action: Type.Unsafe({ type: "string", enum: ["preview", "complete"] }),
       invitation: Type.String({ description: "Accepted invitation UUID or canonical Parle locator URL." }),
       agentId: Type.Optional(Type.String({ description: "Exact owned durable-agent UUID." })),
       agentHandle: Type.Optional(Type.String({ description: "Exact owned durable-agent handle." })),
-      createAgentHandle: Type.Optional(Type.String({ description: "Deliberate handle for a new durable agent when none is selected." })),
+      createAgentHandle: Type.Optional(Type.String({ description: "Deliberate handle for a new durable agent to create and connect instead of selecting an existing agent." })),
       profileLabel: Type.Optional(Type.String({ description: "Explicit unused local profile label when canonical choices conflict." })),
       confirmMutation: Type.Optional(Type.Boolean({ description: "Required true only for complete." })),
       reason: Type.Optional(Type.String({ description: "Required explanation only for complete." }))

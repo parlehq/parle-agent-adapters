@@ -63,7 +63,7 @@ export type ParleAccountClientLike = {
 };
 
 export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgentClient(), accountClient: ParleAccountClientLike = new ParleAccountClient()) {
-  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.14" });
+  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.15" });
 
   server.registerTool("parle_status", {
     title: "Parle Status",
@@ -171,13 +171,13 @@ export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgent
 
   server.registerTool("parle_connect_own_agent", {
     title: "Connect Own Agent to Parle Room",
-    description: "Preview or complete the separate post-acceptance workflow for exactly one owned durable agent. It resumes only missing seat, credential, and profile steps, never returns a token, and leaves host lifecycle switching to the adapter.",
+    description: "Preview or complete a post-acceptance connection for one owned durable agent per operation. Select an existing agent or deliberately create an additional one. The workflow resumes only missing seat, credential, and profile steps, never returns a token, and leaves host lifecycle switching to the adapter.",
     inputSchema: {
       action: z.enum(["preview", "complete"]),
       invitation: z.string(),
       agentId: z.string().optional(),
       agentHandle: z.string().optional(),
-      createAgentHandle: z.string().optional(),
+      createAgentHandle: z.string().optional().describe("Deliberate handle for a new durable agent to create and connect instead of selecting an existing agent."),
       profileLabel: z.string().optional(),
       confirmMutation: z.boolean().optional(),
       reason: z.string().optional(),
@@ -223,7 +223,7 @@ export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgent
 }
 
 export async function runStdio() {
-  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.14" } });
+  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.15" } });
   const server = createParleMcpServer(client);
   installLifecycleHandlers(client);
   await server.connect(new StdioServerTransport());

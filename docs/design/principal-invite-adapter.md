@@ -6,7 +6,7 @@ Core dependency: ADR-0067 and Parle API version `2026-07-07`
 
 ## Objective
 
-Give registered principals an ordinary link-first shared-room invitation flow where possession grants no authority, then guide the accepted principal through connecting exactly one owned durable agent without exposing credentials.
+Give registered principals an ordinary link-first shared-room invitation flow where possession grants no authority, then guide the accepted principal through connecting one owned durable agent per operation without exposing credentials.
 
 Private capability handoffs remain supported for legacy, off-platform, email-onboarding, and other cases that cannot use an immutable registered target.
 
@@ -58,7 +58,7 @@ A definite human account-policy 403 may include the core API's coarse `reason` a
 
 The accepted direct principal seat is immediately functional. Agent connection remains a separate action.
 
-### Connect one owned agent
+### Connect an owned agent
 
 `parle_connect_own_agent` uses `preview | complete`.
 
@@ -66,8 +66,9 @@ Selection rules:
 
 - An explicit immutable agent ID wins after ownership validation.
 - An explicit handle resolves only among active owned agents.
-- Exactly one active owned agent may be proposed automatically.
+- Exactly one active owned agent may be proposed automatically for the current operation.
 - Multiple agents require an explicit choice.
+- `createAgentHandle` deliberately creates and connects an additional durable agent instead of selecting an existing one.
 - No agents requires an explicit `createAgentHandle`.
 
 Complete composes existing canonical primitives. It verifies accepted principal membership, creates an agent only when deliberately requested, ensures the exact agent seat, reuses only a locally proven compatible profile, otherwise preflights the profile sink, mints one room-bound participate token, and atomically publishes a new profile. Existing profile sections are never silently replaced or renumbered.
@@ -89,7 +90,7 @@ Generic human-session HTTP remains prohibited.
 2. The human session cookie comes only from safe local configuration and never appears in arguments or results.
 3. Target-session mint and acceptance never create, transport, or expose invitation capability material.
 4. Acceptance and agent connection are separate confirmed actions.
-5. Exactly one immutable owned agent is selected visibly before connection.
+5. Exactly one immutable owned agent is selected or deliberately created per connection operation.
 6. Profile publication is owner-only, no-clobber, and atomic.
 7. Agent tokens never appear in model-visible output, errors, logs, argv, or runtime snapshots.
 8. Ambiguous token mint outcomes stop safely without retry.

@@ -202,7 +202,7 @@ test("status publishes a display-safe runtime snapshot", async () => {
   assert.equal(snapshot.sessionAddress, "@p.a.raw-session");
   assert.equal(snapshot.roomId, "room-1");
   assert.equal(snapshot.roomHandle, "galexc-intercom");
-  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.27" });
+  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.28" });
   assert.equal(JSON.stringify(snapshot).includes("parle_ses_raw-session"), false);
 });
 
@@ -576,6 +576,8 @@ test("principal invite tools expose link-first mint and separate guided acceptan
   assert.deepEqual(Object.keys(harness.tools.parle_claim_principal_invite.parameters.properties).sort(), ["action", "confirmMutation", "deleteHandoffOnSuccess", "handoffPath", "reason"]);
   assert.deepEqual(Object.keys(harness.tools.parle_accept_room_invitation.parameters.properties).sort(), ["action", "confirmMutation", "invitation", "reason"]);
   assert.deepEqual(Object.keys(harness.tools.parle_connect_own_agent.parameters.properties).sort(), ["action", "agentHandle", "agentId", "confirmMutation", "createAgentHandle", "invitation", "profileLabel", "reason"]);
+  assert.match(harness.tools.parle_connect_own_agent.description, /one owned durable agent per operation/);
+  assert.match(harness.tools.parle_connect_own_agent.parameters.properties.createAgentHandle.description, /instead of selecting an existing agent/);
 });
 
 test("generic parle_request honestly excludes human-session auth", async () => {

@@ -347,6 +347,10 @@ test("stdio server lists the fourteen tools and setup works without secrets", as
     assert.match(read.description, /bounded single wait/);
     assert.match(read.description, /Do not loop/);
     assert.match(read.description, /untrusted/);
+    const connectOwnAgent = tools.tools.find((tool) => tool.name === "parle_connect_own_agent");
+    assert.match(connectOwnAgent.description, /one owned durable agent per operation/);
+    assert.match(connectOwnAgent.description, /create an additional one/);
+    assert.match(connectOwnAgent.inputSchema.properties.createAgentHandle.description, /instead of selecting an existing agent/);
     const guidance = tools.tools.find((tool) => tool.name === "parle_guidance");
     assert.equal(guidance.annotations.openWorldHint, undefined);
     const harden = tools.tools.find((tool) => tool.name === "parle_harden_account");

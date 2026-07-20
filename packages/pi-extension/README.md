@@ -117,7 +117,7 @@ The extension registers these Pi tools:
 - `parle_harden_account` - perform one typed account-hardening transition without accepting a secret or path. The human separately runs `parle-hardening-secret` on a controlling TTY; it is never auto-launched.
 - `parle_mint_principal_invite` - mint one registered-principal ordinary seat with server-side handle resolution and immutable binding, optionally pin a previously trusted principal UUID, and return the resolved snapshot plus a non-secret canonical locator. Possession grants no authority.
 - `parle_accept_room_invitation` - preview or accept the locator as its immutable authenticated target.
-- `parle_connect_own_agent` - separately preview and complete exact-agent seating, credential custody, and profile publication.
+- `parle_connect_own_agent` - separately preview and complete one agent connection, selecting an existing owned agent or deliberately creating an additional one before seating, credential custody, and profile publication.
 - `parle_claim_principal_invite` - preview or complete a legacy capability invitation from a private local handoff file.
 - `parle_guidance` - fetch Parle guidance from `ai.parle.sh` or API docs surfaces.
 - `parle_request` - make guarded allowlisted unauthenticated or agent-token API requests. Generic human-session requests are intentionally unsupported.

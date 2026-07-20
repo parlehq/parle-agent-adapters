@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.8
+
+- Refresh the shared MCP artifact with explicit guidance for creating and connecting an additional durable agent.
+
 ## 0.1.7
 
 - Refresh the shared MCP artifact with handle-first registered-principal invitation minting and optional immutable target pinning.

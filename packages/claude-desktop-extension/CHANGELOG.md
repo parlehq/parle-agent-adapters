@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.19 (2026-07-20)
+
+Bundled MCP refresh clarifying how to create and connect an additional durable agent.
+
 ## 0.5.18 (2026-07-20)
 
 Bundled MCP refresh with handle-first registered-principal invitation minting and optional immutable target pinning.

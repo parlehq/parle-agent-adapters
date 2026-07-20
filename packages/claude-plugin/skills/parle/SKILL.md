@@ -70,7 +70,7 @@ The recipient uses `parle_accept_room_invitation` in this order:
 3. Only after explicit approval, call action `accept` with `confirmMutation: true` and a reason.
 4. The direct principal seat is functional immediately. Agent connection is separate.
 
-Then use `parle_connect_own_agent` with action `preview`. Show the exact proposed immutable agent, or request a choice when multiple agents exist. Never invent an agent identity. After separate confirmation, call action `complete`. It resumes only missing seat, credential, and profile steps and never returns token material. If it reports `credential: outcome_unknown`, do not retry token minting. Follow the returned recovery guidance.
+Then use `parle_connect_own_agent` with action `preview`. Show the exact proposed immutable agent, or request a choice when multiple agents exist. To deliberately create and connect an additional durable agent, pass `createAgentHandle` instead of `agentId` or `agentHandle`, even when an existing agent is available. Never invent an agent identity. After separate confirmation, call action `complete`. It resumes only missing seat, credential, and profile steps and never returns token material. If it reports `credential: outcome_unknown`, do not retry token minting. Follow the returned recovery guidance.
 
 `parle_claim_principal_invite` remains available for legacy private capability handoffs and invitation cases that cannot use a registered immutable target. Those files remain owner-only mode `0600`. Never read, paste, summarize, upload, or log their contents.
 

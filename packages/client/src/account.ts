@@ -579,7 +579,7 @@ export class ParleAccountClient {
       seat: "missing",
       credential: "missing",
       connection: "profile_ready",
-      next: "The direct principal seat is active and usable. Preview parle_connect_own_agent to select exactly one durable agent.",
+      next: "The direct principal seat is active and usable. Preview parle_connect_own_agent to select one durable agent for this connection, or pass createAgentHandle to create and connect an additional durable agent.",
     };
   }
 
@@ -619,7 +619,7 @@ export class ParleAccountClient {
         action: "preview", inviteId: invitation.inviteId, roomId: invitation.roomId, roomHandle: invitation.roomHandle,
         principal: "accepted", agent: "needs_selection", agents,
         seat: "missing", credential: "missing", connection: "host_restart_required",
-        next: agents.length === 0 ? "Choose an explicit createAgentHandle, then preview again." : "Choose one agentId or agentHandle, then preview again.",
+        next: agents.length === 0 ? "Choose an explicit createAgentHandle, then preview again." : "Choose one agentId or agentHandle, or pass createAgentHandle to create and connect an additional durable agent, then preview again.",
       };
     }
     if (params.action === "preview" && !selected) {
@@ -627,7 +627,7 @@ export class ParleAccountClient {
         action: "preview", inviteId: invitation.inviteId, roomId: invitation.roomId, roomHandle: invitation.roomHandle,
         principal: "accepted", agent: "selected", proposedCreateHandle, agents,
         seat: "missing", credential: "missing", connection: "host_restart_required",
-        next: "Review the deliberate new-agent handle, then complete with explicit confirmation.",
+        next: "Review the deliberate additional-agent handle, then complete with explicit confirmation.",
       };
     }
     if (params.action === "preview" && selected) {
@@ -645,7 +645,7 @@ export class ParleAccountClient {
         seat: activeSeat ? "active" : "missing", ...(activeSeat ? { seatId: validateUUID(String(activeSeat.seat_id || ""), "seat_id") } : {}),
         credential: compatible ? "profile_ready" : "missing", connection: compatible ? "profile_ready" : "host_restart_required",
         ...(compatible ? { profile: compatible.name } : {}),
-        next: compatible ? "The exact agent already has a proven compatible profile. Confirm complete to return the ready binding without minting another credential." : "Review the immutable agent selection and missing steps, then complete with explicit confirmation.",
+        next: compatible ? "The exact agent already has a proven compatible profile. Confirm complete to return the ready binding without minting another credential, or preview again with createAgentHandle to create and connect an additional durable agent." : "Review the immutable agent selection and missing steps, then complete with explicit confirmation. To create a new durable agent instead, preview again with createAgentHandle.",
       };
     }
     let agentState: "selected" | "created" = "selected";
@@ -675,7 +675,7 @@ export class ParleAccountClient {
         principal: "accepted", agent: agentState, selectedAgent: selected,
         seat: "active", seatId: validateUUID(String(seat.seat_id || ""), "seat_id"),
         credential: "profile_ready", connection: "profile_ready", profile: compatible.name,
-        next: "Use the host adapter's existing safe profile-switch lifecycle to connect.",
+        next: "Use the host adapter's existing safe profile-switch lifecycle to connect. To add another durable agent, begin a new preview with createAgentHandle.",
       };
     }
     const roomHandle = invitation.roomHandle;
@@ -731,7 +731,7 @@ export class ParleAccountClient {
       principal: "accepted", agent: agentState, selectedAgent: selected,
       seat: "active", seatId: validateUUID(String(seat.seat_id || ""), "seat_id"),
       credential: "profile_ready", connection: "profile_ready", profile: profileName,
-      next: "Use the host adapter's existing safe profile-switch lifecycle to connect.",
+      next: "Use the host adapter's existing safe profile-switch lifecycle to connect. To add another durable agent, begin a new preview with createAgentHandle.",
     };
   }
 }

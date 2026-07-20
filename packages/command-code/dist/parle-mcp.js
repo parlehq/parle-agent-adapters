@@ -32737,7 +32737,7 @@ var ParleAccountClient = class {
       seat: "missing",
       credential: "missing",
       connection: "profile_ready",
-      next: "The direct principal seat is active and usable. Preview parle_connect_own_agent to select exactly one durable agent."
+      next: "The direct principal seat is active and usable. Preview parle_connect_own_agent to select one durable agent for this connection, or pass createAgentHandle to create and connect an additional durable agent."
     };
   }
   async connectOwnAgent(params, signal) {
@@ -32790,7 +32790,7 @@ var ParleAccountClient = class {
         seat: "missing",
         credential: "missing",
         connection: "host_restart_required",
-        next: agents.length === 0 ? "Choose an explicit createAgentHandle, then preview again." : "Choose one agentId or agentHandle, then preview again."
+        next: agents.length === 0 ? "Choose an explicit createAgentHandle, then preview again." : "Choose one agentId or agentHandle, or pass createAgentHandle to create and connect an additional durable agent, then preview again."
       };
     }
     if (params.action === "preview" && !selected) {
@@ -32806,7 +32806,7 @@ var ParleAccountClient = class {
         seat: "missing",
         credential: "missing",
         connection: "host_restart_required",
-        next: "Review the deliberate new-agent handle, then complete with explicit confirmation."
+        next: "Review the deliberate additional-agent handle, then complete with explicit confirmation."
       };
     }
     if (params.action === "preview" && selected) {
@@ -32832,7 +32832,7 @@ var ParleAccountClient = class {
         credential: compatible2 ? "profile_ready" : "missing",
         connection: compatible2 ? "profile_ready" : "host_restart_required",
         ...compatible2 ? { profile: compatible2.name } : {},
-        next: compatible2 ? "The exact agent already has a proven compatible profile. Confirm complete to return the ready binding without minting another credential." : "Review the immutable agent selection and missing steps, then complete with explicit confirmation."
+        next: compatible2 ? "The exact agent already has a proven compatible profile. Confirm complete to return the ready binding without minting another credential, or preview again with createAgentHandle to create and connect an additional durable agent." : "Review the immutable agent selection and missing steps, then complete with explicit confirmation. To create a new durable agent instead, preview again with createAgentHandle."
       };
     }
     let agentState = "selected";
@@ -32871,7 +32871,7 @@ var ParleAccountClient = class {
         credential: "profile_ready",
         connection: "profile_ready",
         profile: compatible.name,
-        next: "Use the host adapter's existing safe profile-switch lifecycle to connect."
+        next: "Use the host adapter's existing safe profile-switch lifecycle to connect. To add another durable agent, begin a new preview with createAgentHandle."
       };
     }
     const roomHandle = invitation.roomHandle;
@@ -32948,7 +32948,7 @@ var ParleAccountClient = class {
       credential: "profile_ready",
       connection: "profile_ready",
       profile: profileName,
-      next: "Use the host adapter's existing safe profile-switch lifecycle to connect."
+      next: "Use the host adapter's existing safe profile-switch lifecycle to connect. To add another durable agent, begin a new preview with createAgentHandle."
     };
   }
 };
@@ -34084,7 +34084,7 @@ var switchProfileSchema = {
   watcherStopped: external_exports.boolean()
 };
 function createParleMcpServer(client = new ParleAgentClient(), accountClient = new ParleAccountClient()) {
-  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.14" });
+  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.15" });
   server.registerTool("parle_status", {
     title: "Parle Status",
     description: "Show redacted Parle config provenance and runtime state. The result's compactText is the standard card for user-facing status: render it verbatim instead of paraphrasing; config and runtime are diagnostic detail. When configured and not yet connected, this auto-connects the session first (single-flight, backoff-aware); pass inspect:true for a passive read with no network side effects.",
@@ -34183,13 +34183,13 @@ function createParleMcpServer(client = new ParleAgentClient(), accountClient = n
   }, async (params) => safeTool(() => accountClient.acceptRoomInvitation(params)));
   server.registerTool("parle_connect_own_agent", {
     title: "Connect Own Agent to Parle Room",
-    description: "Preview or complete the separate post-acceptance workflow for exactly one owned durable agent. It resumes only missing seat, credential, and profile steps, never returns a token, and leaves host lifecycle switching to the adapter.",
+    description: "Preview or complete a post-acceptance connection for one owned durable agent per operation. Select an existing agent or deliberately create an additional one. The workflow resumes only missing seat, credential, and profile steps, never returns a token, and leaves host lifecycle switching to the adapter.",
     inputSchema: {
       action: external_exports.enum(["preview", "complete"]),
       invitation: external_exports.string(),
       agentId: external_exports.string().optional(),
       agentHandle: external_exports.string().optional(),
-      createAgentHandle: external_exports.string().optional(),
+      createAgentHandle: external_exports.string().optional().describe("Deliberate handle for a new durable agent to create and connect instead of selecting an existing agent."),
       profileLabel: external_exports.string().optional(),
       confirmMutation: external_exports.boolean().optional(),
       reason: external_exports.string().optional()
@@ -34228,7 +34228,7 @@ function createParleMcpServer(client = new ParleAgentClient(), accountClient = n
   return server;
 }
 async function runStdio() {
-  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.14" } });
+  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.15" } });
   const server = createParleMcpServer(client);
   installLifecycleHandlers(client);
   await server.connect(new StdioServerTransport());
