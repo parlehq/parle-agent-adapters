@@ -7,6 +7,7 @@ import { CONFORMANCE_PARLE_VERSION, CONFORMANCE_TOKEN_CLASSES } from "./conforma
 import { catalogGitExposureWarning, loadProfile, profileCatalogHasProfile, resolveProfileCatalogPath, type CredentialProfile } from "./profiles.js";
 
 export * from "./account.js";
+export * from "./hardening.js";
 export * from "./format.js";
 export * from "./runtime-file.js";
 export { ERROR_ACTIONS, ERROR_REGISTRY, ERROR_SCOPES, type ErrorAction, type ErrorScope } from "./error-contract.js";

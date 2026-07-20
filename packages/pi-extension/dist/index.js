@@ -1,7 +1,7 @@
 // src/index.ts
 import { randomUUID } from "node:crypto";
-import { chmodSync as chmodSync2, existsSync as existsSync3, lstatSync as lstatSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync3, readdirSync, realpathSync as realpathSync2, renameSync as renameSync2, rmSync, statSync as statSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { basename as basename2, dirname as dirname3, join as join3 } from "node:path";
+import { chmodSync as chmodSync2, existsSync as existsSync4, lstatSync as lstatSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync4, readdirSync, realpathSync as realpathSync2, renameSync as renameSync3, rmSync, statSync as statSync3, unlinkSync as unlinkSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { basename as basename2, dirname as dirname4, join as join4 } from "node:path";
 
 // ../client/dist/error-contract.js
 function retryable(action) {
@@ -205,19 +205,41 @@ function loadProfile(name, path = PROFILE_CATALOG_PATH) {
 
 // ../client/dist/account.js
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { chmodSync, closeSync, existsSync as existsSync2, lstatSync as lstatSync2, mkdirSync, openSync, readFileSync as readFileSync2, realpathSync, renameSync, statSync as statSync2, unlinkSync, writeFileSync } from "node:fs";
-import { basename, dirname as dirname2, isAbsolute as isAbsolute2, join as join2 } from "node:path";
+import { chmodSync, closeSync as closeSync2, existsSync as existsSync3, lstatSync as lstatSync3, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync3, realpathSync, renameSync as renameSync2, statSync as statSync2, unlinkSync as unlinkSync2, writeFileSync } from "node:fs";
+import { basename, dirname as dirname3, isAbsolute as isAbsolute2, join as join3 } from "node:path";
+
+// ../client/dist/hardening.js
+import { createHash } from "node:crypto";
+import { closeSync, existsSync as existsSync2, fsyncSync, fstatSync, ftruncateSync, lstatSync as lstatSync2, mkdirSync, openSync, readFileSync as readFileSync2, renameSync, unlinkSync, writeSync } from "node:fs";
+import { dirname as dirname2, join as join2 } from "node:path";
 var DEFAULT_API_BASE = "https://api.parle.sh";
+var MAX_SECRET_BYTES = 8 * 1024;
 var MAX_RESPONSE_BYTES = 64 * 1024;
-var MAX_HANDOFF_BYTES = 32 * 1024;
-var UUID_RE2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-var INVITE_SECRET_RE = /^parle_inv_\S{16,256}$/;
-var INVITE_CODE_RE = /^[A-Z0-9]{6,32}$/;
-var RESERVED_HANDLES = /* @__PURE__ */ new Set(["admin", "agent", "agents", "api", "me", "null", "parle", "room", "rooms", "root", "support", "system", "www"]);
-var MINT_DENIAL_NEXT_ACTION = {
-  unhardened: "set a password, then enroll a second factor",
-  cooldown: "wait for the post-recovery cooldown to lapse",
-  account_restricted: "this account cannot expand its reach right now"
+var MAX_RECOVERY_CODES = 64;
+var STATE_FILE = "state.json";
+var ACK_FILE = "recovery-stored.ack";
+var CEREMONY_DIR = "current";
+var SECRET_FILES = ["password.input", "current-password.input", "bootstrap-proof.input", "totp-code.input", "provisioning-uri.txt", "recovery-codes.txt"];
+var HardeningError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "HardeningError";
+  }
+};
+var HardeningHttpError = class extends HardeningError {
+  status;
+  ambiguous;
+  constructor(status) {
+    super(status >= 500 ? "Parle hardening request outcome is unknown. Do not retry automatically." : `Parle hardening request was rejected with HTTP ${status}.`);
+    this.status = status;
+    this.ambiguous = status >= 500;
+  }
+};
+var HardeningTransportError = class extends HardeningError {
+  ambiguous = true;
+  constructor() {
+    super("Parle hardening request outcome is unknown. Do not retry automatically.");
+  }
 };
 function parseDotEnv(text) {
   const values = {};
@@ -236,8 +258,920 @@ function parseDotEnv(text) {
   }
   return values;
 }
+function firstValue(key, env, dotEnv) {
+  return env[key] || dotEnv[key] || void 0;
+}
+function assertSafeApiBase(base, env) {
+  const url = new URL(base);
+  const local = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname);
+  if (local && env.PARLE_ALLOW_INSECURE_LOCAL === "1")
+    return url.origin;
+  if (url.protocol !== "https:" || url.username || url.password)
+    throw new HardeningError("Parle hardening requires an approved HTTPS API base.");
+  return url.origin;
+}
+function ownerAndMode(stat, mode, label) {
+  if (process.platform === "win32")
+    return;
+  if (stat.uid !== process.getuid?.())
+    throw new HardeningError(`${label} must be owned by the current user.`);
+  if ((stat.mode & 511) !== mode)
+    throw new HardeningError(`${label} must have mode ${mode.toString(8)}.`);
+}
+function assertSecureDirectory(path, label) {
+  let entry;
+  try {
+    entry = lstatSync2(path);
+  } catch {
+    throw new HardeningError(`${label} is missing.`);
+  }
+  if (entry.isSymbolicLink() || !entry.isDirectory())
+    throw new HardeningError(`${label} must be a real directory.`);
+  ownerAndMode(entry, 448, label);
+}
+function assertSecureFile(path, label, maxBytes = MAX_SECRET_BYTES) {
+  let entry;
+  try {
+    entry = lstatSync2(path);
+  } catch {
+    throw new HardeningError(`${label} is missing.`);
+  }
+  if (entry.isSymbolicLink() || !entry.isFile() || entry.nlink !== 1)
+    throw new HardeningError(`${label} must be an unlinked regular file.`);
+  ownerAndMode(entry, 384, label);
+  if (entry.size > maxBytes)
+    throw new HardeningError(`${label} exceeds its bounded size.`);
+  return entry;
+}
+function createSecureDirectory(path, label) {
+  if (!existsSync2(path)) {
+    try {
+      mkdirSync(path, { mode: 448 });
+    } catch {
+      throw new HardeningError(`Could not create ${label}.`);
+    }
+  }
+  assertSecureDirectory(path, label);
+}
+function syncDirectory(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    fsyncSync(fd);
+  } catch (error) {
+    if (!["EINVAL", "ENOTSUP", "EPERM"].includes(error?.code))
+      throw new HardeningError("Could not sync protected hardening storage.");
+  } finally {
+    if (fd !== void 0)
+      try {
+        closeSync(fd);
+      } catch {
+      }
+  }
+}
+function clearBuffer(value) {
+  if (value)
+    value.fill(0);
+}
+function secureUnlink(path, label) {
+  if (!existsSync2(path))
+    return;
+  assertSecureFile(path, label);
+  try {
+    unlinkSync(path);
+  } catch {
+    throw new HardeningError(`Could not remove ${label}.`);
+  }
+}
+function parseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return void 0;
+  }
+}
+function hasOnlyKeys(value, keys) {
+  const actual = Object.keys(value).sort();
+  return actual.length === keys.length && actual.every((key, index) => key === [...keys].sort()[index]);
+}
+function validWhoami(value) {
+  const body = value && typeof value === "object" ? value : void 0;
+  if (!body || body.authenticated !== true || body.assurance !== "unhardened" && body.assurance !== "hardened") {
+    throw new HardeningError("Parle hardening received an invalid whoami response.");
+  }
+  return { assurance: body.assurance };
+}
+function validSudo(value, now) {
+  const body = value && typeof value === "object" ? value : void 0;
+  const expiresAt = typeof body?.expires_at === "string" ? Date.parse(body.expires_at) : NaN;
+  if (!body || !hasOnlyKeys(body, ["expires_at"]) || !Number.isFinite(expiresAt) || expiresAt <= now.getTime()) {
+    throw new HardeningError("Parle hardening received an invalid sudo response.");
+  }
+}
+function validProvisioningUri(value) {
+  const body = value && typeof value === "object" ? value : void 0;
+  const uri = typeof body?.provisioning_uri === "string" ? body.provisioning_uri : "";
+  if (!body || !hasOnlyKeys(body, ["provisioning_uri"]) || !uri || Buffer.byteLength(uri, "utf8") > MAX_SECRET_BYTES || /[\r\n]/.test(uri)) {
+    throw new HardeningError("Parle hardening received an invalid provisioning response.");
+  }
+  let parsed;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    throw new HardeningError("Parle hardening received an invalid provisioning response.");
+  }
+  if (parsed.protocol !== "otpauth:" || parsed.hostname !== "totp" || !parsed.searchParams.get("secret") || parsed.username || parsed.password) {
+    throw new HardeningError("Parle hardening received an invalid provisioning response.");
+  }
+  return uri;
+}
+function validRecoveryCodes(value) {
+  const body = value && typeof value === "object" ? value : void 0;
+  const codes = body?.recovery_codes;
+  if (!body || !hasOnlyKeys(body, ["recovery_codes"]) || !Array.isArray(codes) || codes.length === 0 || codes.length > MAX_RECOVERY_CODES || codes.some((code) => typeof code !== "string" || !code || Buffer.byteLength(code, "utf8") > 256 || /[\r\n]/.test(code))) {
+    throw new HardeningError("Parle hardening received an invalid recovery-code response.");
+  }
+  return codes;
+}
+function isAmbiguous(error) {
+  return error instanceof HardeningTransportError || error instanceof HardeningHttpError && error.ambiguous;
+}
+function ceremonyPath(config) {
+  return join2(config.stateDir, "hardening", CEREMONY_DIR);
+}
+function rootPath(config) {
+  return join2(config.stateDir, "hardening");
+}
+function outputPath(config, file) {
+  return join2(ceremonyPath(config), file);
+}
+function resolveHardeningConfig(cwd, env) {
+  const dotEnvPath = join2(cwd, ".env");
+  const dotEnv = existsSync2(dotEnvPath) ? parseDotEnv(readFileSync2(dotEnvPath, "utf8")) : {};
+  const catalogPath = resolveProfileCatalogPath(firstValue("PARLE_PROFILES_PATH", env, dotEnv), cwd, env);
+  const stateDir = dirname2(catalogPath);
+  const parent = lstatSync2(stateDir);
+  if (parent.isSymbolicLink() || !parent.isDirectory())
+    throw new HardeningError("Parle state directory must be a real directory.");
+  if (process.platform !== "win32" && parent.uid !== process.getuid?.())
+    throw new HardeningError("Parle state directory must be owned by the current user.");
+  const sessionPath = join2(stateDir, "session");
+  assertSecureFile(sessionPath, "Parle human session file", 8192);
+  const sessionCookie = readFileSync2(sessionPath, "utf8").trim();
+  if (!sessionCookie || /[\r\n]/.test(sessionCookie))
+    throw new HardeningError("Parle human session file is invalid.");
+  let configuredApiBase = firstValue("PARLE_API_BASE", env, dotEnv);
+  if (!configuredApiBase && existsSync2(catalogPath)) {
+    const selected = firstValue("PARLE_PROFILE", env, dotEnv) || (profileCatalogHasProfile("default", catalogPath) ? "default" : void 0);
+    if (selected)
+      configuredApiBase = loadProfile(selected, catalogPath).apiBase;
+  }
+  return {
+    apiBase: assertSafeApiBase(configuredApiBase || DEFAULT_API_BASE, env),
+    version: env.PARLE_VERSION || CONFORMANCE_PARLE_VERSION,
+    sessionCookie,
+    stateDir
+  };
+}
+var ParleHardeningClient = class {
+  cwd;
+  env;
+  fetchImpl;
+  now;
+  constructor(options = {}) {
+    this.cwd = options.cwd || process.cwd();
+    this.env = options.env || process.env;
+    this.fetchImpl = options.fetch || fetch;
+    this.now = options.now || (() => /* @__PURE__ */ new Date());
+  }
+  config() {
+    return resolveHardeningConfig(this.cwd, this.env);
+  }
+  fingerprint(config) {
+    return createHash("sha256").update(config.sessionCookie, "utf8").digest("hex");
+  }
+  ensureRoot(config) {
+    createSecureDirectory(rootPath(config), "Parle hardening root");
+  }
+  readState(config, required = true) {
+    const root = rootPath(config);
+    if (!existsSync2(root)) {
+      if (required)
+        throw new HardeningError("No active Parle hardening ceremony exists. Run parle_harden_account status first.");
+      return void 0;
+    }
+    assertSecureDirectory(root, "Parle hardening root");
+    const dir = ceremonyPath(config);
+    if (!existsSync2(dir)) {
+      if (required)
+        throw new HardeningError("No active Parle hardening ceremony exists. Run parle_harden_account status first.");
+      return void 0;
+    }
+    assertSecureDirectory(dir, "Parle hardening ceremony directory");
+    const path = join2(dir, STATE_FILE);
+    assertSecureFile(path, "Parle hardening state", MAX_SECRET_BYTES);
+    const raw = parseJson(readFileSync2(path, "utf8"));
+    const state = raw && typeof raw === "object" ? raw : void 0;
+    const phases = ["needs_password", "sudo_ready", "provisioning_captured", "awaiting_confirmation", "hardened_recovery_captured", "finalized", "password_outcome_unknown", "enroll_outcome_unknown", "confirm_outcome_unknown", "hardened_recovery_missing", "recovery_regeneration_outcome_unknown"];
+    if (!state || state.schemaVersion !== 1 || !Number.isInteger(state.generation) || state.generation < 0 || !phases.includes(state.phase) || typeof state.sessionFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(state.sessionFingerprint) || typeof state.createdAt !== "string" || typeof state.updatedAt !== "string") {
+      throw new HardeningError("Parle hardening state is invalid.");
+    }
+    if (state.passwordMode !== void 0 && state.passwordMode !== "set" && state.passwordMode !== "change")
+      throw new HardeningError("Parle hardening state is invalid.");
+    return state;
+  }
+  assertBound(config, state) {
+    if (state.sessionFingerprint !== this.fingerprint(config))
+      throw new HardeningError("The Parle human session changed. This active hardening ceremony is invalidated.");
+  }
+  writeState(config, next, expectedGeneration) {
+    const dir = ceremonyPath(config);
+    assertSecureDirectory(rootPath(config), "Parle hardening root");
+    assertSecureDirectory(dir, "Parle hardening ceremony directory");
+    const statePath = join2(dir, STATE_FILE);
+    if (expectedGeneration !== void 0 && existsSync2(statePath)) {
+      const current = this.readState(config);
+      if (current.generation !== expectedGeneration)
+        throw new HardeningError("Parle hardening state changed concurrently.");
+    }
+    const temp = join2(dir, `.state-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`);
+    let fd;
+    try {
+      fd = openSync(temp, "wx", 384);
+      const body = Buffer.from(JSON.stringify(next) + "\n", "utf8");
+      try {
+        writeSync(fd, body);
+        fsyncSync(fd);
+      } finally {
+        clearBuffer(body);
+      }
+      closeSync(fd);
+      fd = void 0;
+      assertSecureFile(temp, "Parle hardening state", MAX_SECRET_BYTES);
+      renameSync(temp, statePath);
+      assertSecureFile(statePath, "Parle hardening state", MAX_SECRET_BYTES);
+      syncDirectory(dir);
+    } catch {
+      throw new HardeningError("Could not publish protected hardening state.");
+    } finally {
+      if (fd !== void 0)
+        try {
+          closeSync(fd);
+        } catch {
+        }
+      try {
+        if (existsSync2(temp))
+          unlinkSync(temp);
+      } catch {
+      }
+    }
+  }
+  begin(config) {
+    this.ensureRoot(config);
+    const existing = this.readState(config, false);
+    if (existing)
+      return existing;
+    const dir = ceremonyPath(config);
+    createSecureDirectory(dir, "Parle hardening ceremony directory");
+    const now = this.now().toISOString();
+    const state = { schemaVersion: 1, generation: 0, phase: "needs_password", sessionFingerprint: this.fingerprint(config), createdAt: now, updatedAt: now };
+    this.writeState(config, state);
+    return state;
+  }
+  transition(config, state, phases, patch) {
+    if (!phases.includes(state.phase))
+      throw new HardeningError("Parle hardening action is not valid in the current ceremony state.");
+    const next = {
+      ...state,
+      ...patch,
+      schemaVersion: 1,
+      generation: state.generation + 1,
+      sessionFingerprint: state.sessionFingerprint,
+      createdAt: state.createdAt,
+      updatedAt: this.now().toISOString()
+    };
+    this.writeState(config, next, state.generation);
+    return next;
+  }
+  readSecret(config, file) {
+    const path = outputPath(config, file);
+    assertSecureFile(path, `Parle hardening ${file}`);
+    const value = readFileSync2(path);
+    if (value.length === 0 || value.length > MAX_SECRET_BYTES) {
+      clearBuffer(value);
+      throw new HardeningError("Protected hardening input is invalid.");
+    }
+    return value;
+  }
+  createSecret(config, file, value) {
+    if (value.length === 0 || value.length > MAX_SECRET_BYTES)
+      throw new HardeningError("Hardening input is invalid.");
+    const dir = ceremonyPath(config);
+    assertSecureDirectory(dir, "Parle hardening ceremony directory");
+    const path = outputPath(config, file);
+    let fd;
+    let created = false;
+    try {
+      fd = openSync(path, "wx", 384);
+      created = true;
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.nlink !== 1)
+        throw new HardeningError("Protected hardening input is unsafe.");
+      ownerAndMode(stat, 384, "Protected hardening input");
+      let written = 0;
+      while (written < value.length)
+        written += writeSync(fd, value, written, value.length - written);
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = void 0;
+      assertSecureFile(path, `Parle hardening ${file}`);
+      syncDirectory(dir);
+    } catch (error) {
+      try {
+        if (fd !== void 0)
+          closeSync(fd);
+      } catch {
+      }
+      try {
+        if (created && existsSync2(path))
+          unlinkSync(path);
+      } catch {
+      }
+      if (error instanceof HardeningError)
+        throw error;
+      throw new HardeningError("Could not stage protected hardening input.");
+    }
+  }
+  openSink(config, file) {
+    const dir = ceremonyPath(config);
+    assertSecureDirectory(dir, "Parle hardening ceremony directory");
+    const path = outputPath(config, file);
+    let fd;
+    try {
+      fd = openSync(path, "wx", 384);
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.nlink !== 1)
+        throw new HardeningError("Protected hardening output is unsafe.");
+      ownerAndMode(stat, 384, "Protected hardening output");
+      return { fd, path };
+    } catch (error) {
+      try {
+        if (fd !== void 0)
+          closeSync(fd);
+      } catch {
+      }
+      if (error instanceof HardeningError)
+        throw error;
+      throw new HardeningError("Protected hardening output is already occupied or unsafe.");
+    }
+  }
+  discardSink(config, sink) {
+    try {
+      closeSync(sink.fd);
+    } catch {
+    }
+    try {
+      if (existsSync2(sink.path))
+        secureUnlink(sink.path, "protected hardening output");
+    } catch {
+      throw new HardeningError("Could not discard protected hardening output.");
+    }
+    syncDirectory(ceremonyPath(config));
+  }
+  writeSink(config, sink, value) {
+    let closed = false;
+    try {
+      let written = 0;
+      while (written < value.length)
+        written += writeSync(sink.fd, value, written, value.length - written);
+      fsyncSync(sink.fd);
+      closeSync(sink.fd);
+      closed = true;
+      assertSecureFile(sink.path, "protected hardening output");
+      syncDirectory(ceremonyPath(config));
+    } catch {
+      if (!closed) {
+        try {
+          ftruncateSync(sink.fd, 0);
+          fsyncSync(sink.fd);
+        } catch {
+        }
+        try {
+          closeSync(sink.fd);
+        } catch {
+        }
+        try {
+          if (existsSync2(sink.path))
+            secureUnlink(sink.path, "protected hardening output");
+        } catch {
+        }
+      }
+      throw new HardeningError("Could not durably capture protected hardening output.");
+    } finally {
+      clearBuffer(value);
+    }
+  }
+  async request(config, path, method, body) {
+    let encoded;
+    try {
+      encoded = body === void 0 ? void 0 : JSON.stringify(body);
+      const response = await this.fetchImpl(new URL(path, config.apiBase), {
+        method,
+        headers: {
+          Accept: "application/json",
+          "Parle-Version": config.version,
+          Cookie: config.sessionCookie,
+          ...encoded ? { "Content-Type": "application/json" } : {}
+        },
+        body: encoded
+      });
+      let raw;
+      try {
+        raw = Buffer.from(await response.arrayBuffer());
+      } catch {
+        throw new HardeningTransportError();
+      }
+      if (raw.byteLength > MAX_RESPONSE_BYTES) {
+        clearBuffer(raw);
+        throw new HardeningError("Parle hardening response exceeded its bounded size.");
+      }
+      if (!response.ok) {
+        clearBuffer(raw);
+        throw new HardeningHttpError(response.status);
+      }
+      const json = response.status === 204 ? void 0 : parseJson(raw.toString("utf8"));
+      clearBuffer(raw);
+      return { status: response.status, json };
+    } catch (error) {
+      if (error instanceof HardeningError)
+        throw error;
+      throw new HardeningTransportError();
+    } finally {
+      encoded = void 0;
+    }
+  }
+  async whoami(config) {
+    const response = await this.request(config, "/v/auth/whoami", "GET");
+    if (response.status !== 200)
+      throw new HardeningError("Parle hardening received an invalid whoami response.");
+    return validWhoami(response.json);
+  }
+  async openBootstrapSudo(config, proof) {
+    let proofText;
+    try {
+      proofText = proof.toString("utf8");
+      const response = await this.request(config, "/v/auth/sudo", "POST", { factor: "bootstrap_reauth", proof: proofText });
+      if (response.status !== 200)
+        throw new HardeningError("Parle hardening received an invalid sudo response.");
+      validSudo(response.json, this.now());
+    } finally {
+      proofText = void 0;
+      clearBuffer(proof);
+    }
+  }
+  async openTotpSudo(config, code) {
+    let codeText;
+    try {
+      codeText = code.toString("utf8");
+      const response = await this.request(config, "/v/auth/sudo", "POST", { factor: "totp", code: codeText });
+      if (response.status !== 200)
+        throw new HardeningError("Parle hardening received an invalid sudo response.");
+      validSudo(response.json, this.now());
+    } finally {
+      codeText = void 0;
+      clearBuffer(code);
+    }
+  }
+  requireConfirmedMutation(params) {
+    if (params.confirmMutation !== true || !params.reason?.trim())
+      throw new HardeningError(`parle_harden_account ${params.action} requires confirmMutation=true and a reason.`);
+  }
+  async stagePassword(mode, password, currentPassword) {
+    const config = this.config();
+    const state = this.readState(config);
+    this.assertBound(config, state);
+    if (state.phase !== "needs_password" || state.passwordMode || state.passwordSet)
+      throw new HardeningError("A password input is not expected in the current hardening state.");
+    if (mode === "change" && !currentPassword)
+      throw new HardeningError("Current password input is required for change mode.");
+    if (mode === "set" && currentPassword)
+      throw new HardeningError("Current password input is not valid for set mode.");
+    let passwordStaged = false;
+    let currentStaged = false;
+    try {
+      if (currentPassword) {
+        this.createSecret(config, "current-password.input", currentPassword);
+        currentStaged = true;
+      }
+      this.createSecret(config, "password.input", password);
+      passwordStaged = true;
+      this.transition(config, state, ["needs_password"], { passwordMode: mode });
+    } catch (error) {
+      try {
+        if (passwordStaged)
+          secureUnlink(outputPath(config, "password.input"), "protected hardening input");
+      } catch {
+      }
+      try {
+        if (currentStaged)
+          secureUnlink(outputPath(config, "current-password.input"), "protected hardening input");
+      } catch {
+      }
+      throw error;
+    } finally {
+      clearBuffer(password);
+      clearBuffer(currentPassword);
+    }
+  }
+  async stageBootstrapProof(proof) {
+    const config = this.config();
+    const state = this.readState(config);
+    this.assertBound(config, state);
+    if (!state.sudoNeedsRefresh || state.phase === "finalized")
+      throw new HardeningError("A bootstrap proof is not expected in the current hardening state.");
+    try {
+      this.createSecret(config, "bootstrap-proof.input", proof);
+    } finally {
+      clearBuffer(proof);
+    }
+  }
+  async stageTotpCode(code) {
+    const config = this.config();
+    const state = this.readState(config);
+    this.assertBound(config, state);
+    if (!["provisioning_captured", "awaiting_confirmation", "confirm_outcome_unknown", "hardened_recovery_missing", "recovery_regeneration_outcome_unknown"].includes(state.phase)) {
+      throw new HardeningError("A TOTP code is not expected in the current hardening state.");
+    }
+    if (!/^\d{6}$/.test(code.toString("utf8"))) {
+      clearBuffer(code);
+      throw new HardeningError("TOTP input must be exactly six digits.");
+    }
+    try {
+      this.createSecret(config, "totp-code.input", code);
+    } finally {
+      clearBuffer(code);
+    }
+  }
+  provisioningPath() {
+    const config = this.config();
+    const state = this.readState(config);
+    this.assertBound(config, state);
+    if (!["provisioning_captured", "awaiting_confirmation"].includes(state.phase))
+      throw new HardeningError("No captured provisioning URI is available.");
+    assertSecureFile(outputPath(config, "provisioning-uri.txt"), "protected provisioning URI");
+    return outputPath(config, "provisioning-uri.txt");
+  }
+  readProvisioningUriForTty() {
+    this.provisioningPath();
+    return this.readSecret(this.config(), "provisioning-uri.txt");
+  }
+  async acknowledgeRecoveryStored() {
+    const config = this.config();
+    const state = this.readState(config);
+    this.assertBound(config, state);
+    if (state.phase !== "hardened_recovery_captured" || !state.recoveryCaptured)
+      throw new HardeningError("Recovery storage acknowledgement is not expected yet.");
+    assertSecureFile(outputPath(config, "recovery-codes.txt"), "protected recovery codes");
+    const path = join2(ceremonyPath(config), ACK_FILE);
+    const value = Buffer.from(JSON.stringify({ schemaVersion: 1, acknowledgedAt: this.now().toISOString() }) + "\n", "utf8");
+    try {
+      this.createSecret(config, ACK_FILE, value);
+    } finally {
+      clearBuffer(value);
+    }
+  }
+  async hardenAccount(params) {
+    const config = this.config();
+    if (!["status", "prepare", "refresh_sudo", "enroll_totp", "confirm_totp", "recover_confirm", "finalize"].includes(params.action))
+      throw new HardeningError("parle_harden_account action is invalid.");
+    if (params.action === "status")
+      return this.status(config);
+    this.requireConfirmedMutation(params);
+    switch (params.action) {
+      case "prepare":
+        return this.prepare(config);
+      case "refresh_sudo":
+        return this.refreshSudo(config);
+      case "enroll_totp":
+        return this.enrollTotp(config);
+      case "confirm_totp":
+        return this.confirmTotp(config);
+      case "recover_confirm":
+        return this.recoverConfirm(config);
+      case "finalize":
+        return this.finalize(config);
+      default:
+        throw new HardeningError("parle_harden_account action is invalid.");
+    }
+  }
+  async status(config) {
+    const whoami = await this.whoami(config);
+    let state = this.readState(config, false);
+    if (!state && whoami.assurance === "unhardened")
+      state = this.begin(config);
+    if (!state) {
+      return { action: "status", assurance: whoami.assurance, state: "none", next: "No local ceremony is active. Do not regenerate recovery codes without a separately authorized recovery procedure." };
+    }
+    if (state.sessionFingerprint !== this.fingerprint(config)) {
+      return { action: "status", assurance: whoami.assurance, state: "session_changed", next: "The human session changed. Do not use this ceremony; start a new authorized ceremony after resolving the protected local state." };
+    }
+    if (state.phase === "finalized") {
+      if (whoami.assurance !== "hardened")
+        return { action: "status", assurance: whoami.assurance, state: "state_conflict", next: "The finalized local ceremony conflicts with current server assurance. Stop and reconcile manually." };
+      return { action: "status", assurance: "hardened", state: "finalized", complete: true, next: "Hardening ceremony complete." };
+    }
+    if (whoami.assurance === "hardened") {
+      if (state.phase === "hardened_recovery_captured" && state.recoveryCaptured && state.assuranceVerified && existsSync2(outputPath(config, "recovery-codes.txt"))) {
+        try {
+          assertSecureFile(outputPath(config, "recovery-codes.txt"), "protected recovery codes");
+          return { action: "status", assurance: "hardened", state: state.phase, complete: true, recoveryPath: outputPath(config, "recovery-codes.txt"), next: "Move recovery codes to protected storage, acknowledge that step with parle-hardening-secret ack-recovery-stored, then finalize." };
+        } catch {
+        }
+      }
+      return { action: "status", assurance: "hardened", state: state.phase, next: "Run parle_harden_account recover_confirm with explicit confirmation. It will verify durable recovery capture or require a fresh human-only TOTP code before exactly one recovery-code regeneration." };
+    }
+    const next = state.phase === "needs_password" || state.phase === "password_outcome_unknown" ? state.passwordSet ? "Run parle_harden_account prepare with explicit confirmation to open bootstrap sudo." : state.passwordMode ? "Run parle_harden_account prepare with explicit confirmation." : "Run parle-hardening-secret password in a separate terminal, then run parle_harden_account prepare with explicit confirmation." : state.sudoNeedsRefresh ? "Run parle-hardening-secret bootstrap-proof in a separate terminal, then run parle_harden_account refresh_sudo with explicit confirmation." : state.phase === "sudo_ready" || state.phase === "enroll_outcome_unknown" ? "Run parle_harden_account enroll_totp with explicit confirmation." : state.phase === "provisioning_captured" || state.phase === "awaiting_confirmation" ? "Scan the protected provisioning QR in a separate terminal, run parle-hardening-secret totp-code, then run parle_harden_account confirm_totp with explicit confirmation." : "Stop and reconcile the hardening ceremony state.";
+    return { action: "status", assurance: "unhardened", state: state.phase, next };
+  }
+  async prepare(config) {
+    let state = this.readState(config);
+    this.assertBound(config, state);
+    if (!["needs_password", "password_outcome_unknown"].includes(state.phase) || !state.passwordMode)
+      throw new HardeningError("Password preparation is not valid in the current hardening state.");
+    let password = this.readSecret(config, "password.input");
+    let current;
+    try {
+      if (state.passwordMode === "change")
+        current = this.readSecret(config, "current-password.input");
+      if (state.phase === "password_outcome_unknown") {
+        try {
+          await this.openBootstrapSudo(config, password);
+          state = this.transition(config, state, ["password_outcome_unknown"], { phase: "sudo_ready", passwordSet: true, sudoNeedsRefresh: false });
+          secureUnlink(outputPath(config, "password.input"), "protected password input");
+          if (current)
+            secureUnlink(outputPath(config, "current-password.input"), "protected current-password input");
+          return { action: "prepare", state: state.phase, sudo: "ready", next: "Run parle_harden_account enroll_totp with explicit confirmation." };
+        } catch (error) {
+          if (isAmbiguous(error))
+            throw error;
+          throw new HardeningError("Password outcome remains unknown. Reconcile with the account owner; do not repeat the password mutation automatically.");
+        }
+      }
+      if (!state.passwordSet) {
+        let passwordText;
+        let currentText;
+        try {
+          passwordText = password.toString("utf8");
+          currentText = current?.toString("utf8");
+          const response = await this.request(config, "/v/auth/password", "POST", { new_password: passwordText, ...currentText ? { current_password: currentText } : {} });
+          if (response.status !== 204)
+            throw new HardeningError("Parle hardening received an invalid password response.");
+          state = this.transition(config, state, ["needs_password"], { passwordSet: true });
+        } catch (error) {
+          if (isAmbiguous(error))
+            this.transition(config, state, ["needs_password"], { phase: "password_outcome_unknown" });
+          else {
+            secureUnlink(outputPath(config, "password.input"), "protected password input");
+            if (current)
+              secureUnlink(outputPath(config, "current-password.input"), "protected current-password input");
+            this.transition(config, state, ["needs_password"], { passwordMode: void 0 });
+          }
+          throw error;
+        } finally {
+          passwordText = void 0;
+          currentText = void 0;
+        }
+      }
+      clearBuffer(password);
+      password = this.readSecret(config, "password.input");
+      await this.openBootstrapSudo(config, password);
+      state = this.transition(config, state, ["needs_password"], { phase: "sudo_ready", sudoNeedsRefresh: false });
+      secureUnlink(outputPath(config, "password.input"), "protected password input");
+      if (current)
+        secureUnlink(outputPath(config, "current-password.input"), "protected current-password input");
+      return { action: "prepare", state: state.phase, sudo: "ready", next: "Run parle_harden_account enroll_totp with explicit confirmation." };
+    } finally {
+      clearBuffer(password);
+      clearBuffer(current);
+    }
+  }
+  async refreshSudo(config) {
+    let state = this.readState(config);
+    this.assertBound(config, state);
+    if (!state.sudoNeedsRefresh)
+      throw new HardeningError("A sudo refresh is not required in the current hardening state.");
+    const whoami = await this.whoami(config);
+    if (whoami.assurance !== "unhardened")
+      throw new HardeningError("Bootstrap sudo refresh is unavailable after hardening.");
+    const proof = this.readSecret(config, "bootstrap-proof.input");
+    try {
+      await this.openBootstrapSudo(config, proof);
+      state = this.transition(config, state, [state.phase], { sudoNeedsRefresh: false });
+      secureUnlink(outputPath(config, "bootstrap-proof.input"), "protected bootstrap proof");
+      return { action: "refresh_sudo", state: state.phase, sudo: "ready", next: "Resume only the named hardening transition with explicit confirmation." };
+    } catch (error) {
+      if (!isAmbiguous(error))
+        secureUnlink(outputPath(config, "bootstrap-proof.input"), "protected bootstrap proof");
+      throw error;
+    } finally {
+      clearBuffer(proof);
+    }
+  }
+  async enrollTotp(config) {
+    let state = this.readState(config);
+    this.assertBound(config, state);
+    if (!["sudo_ready", "enroll_outcome_unknown"].includes(state.phase) || state.sudoNeedsRefresh)
+      throw new HardeningError("TOTP enrollment is not valid in the current hardening state.");
+    const sink = this.openSink(config, "provisioning-uri.txt");
+    let uri;
+    try {
+      const response = await this.request(config, "/v/auth/totp/enroll", "POST", {});
+      if (response.status !== 200)
+        throw new HardeningError("Parle hardening received an invalid enrollment response.");
+      uri = validProvisioningUri(response.json);
+      this.writeSink(config, sink, Buffer.from(uri, "utf8"));
+      state = this.transition(config, state, ["sudo_ready", "enroll_outcome_unknown"], { phase: "provisioning_captured", sudoNeedsRefresh: false });
+      return { action: "enroll_totp", state: state.phase, provisioningPath: outputPath(config, "provisioning-uri.txt"), next: "In a separate terminal with scrollback and recording disabled, run parle-hardening-secret show-provisioning-qr, scan it into the human authenticator, then stage a current code with parle-hardening-secret totp-code." };
+    } catch (error) {
+      try {
+        this.discardSink(config, sink);
+      } catch {
+      }
+      if (isAmbiguous(error) || error instanceof HardeningError && /invalid enrollment response|invalid provisioning response|durably capture/.test(error.message)) {
+        this.transition(config, state, ["sudo_ready", "enroll_outcome_unknown"], { phase: "enroll_outcome_unknown" });
+      } else if (error instanceof HardeningHttpError && error.status === 403) {
+        this.transition(config, state, ["sudo_ready", "enroll_outcome_unknown"], { sudoNeedsRefresh: true });
+      }
+      throw error;
+    } finally {
+      uri = void 0;
+    }
+  }
+  async confirmTotp(config) {
+    let state = this.readState(config);
+    this.assertBound(config, state);
+    if (!["provisioning_captured", "awaiting_confirmation"].includes(state.phase) || state.sudoNeedsRefresh)
+      throw new HardeningError("TOTP confirmation is not valid in the current hardening state.");
+    const code = this.readSecret(config, "totp-code.input");
+    const sink = this.openSink(config, "recovery-codes.txt");
+    let serverConfirmed = false;
+    let sinkWritten = false;
+    try {
+      const response = await this.request(config, "/v/auth/totp/confirm", "POST", { code: code.toString("utf8") });
+      clearBuffer(code);
+      if (response.status !== 200)
+        throw new HardeningError("Parle hardening received an invalid confirmation response.");
+      serverConfirmed = true;
+      const recovery = validRecoveryCodes(response.json);
+      const payload = Buffer.from(recovery.join("\n") + "\n", "utf8");
+      recovery.fill("");
+      this.writeSink(config, sink, payload);
+      sinkWritten = true;
+      state = this.transition(config, state, ["provisioning_captured", "awaiting_confirmation"], { phase: "hardened_recovery_captured", recoveryCaptured: true, assuranceVerified: false });
+      const whoami = await this.whoami(config);
+      if (whoami.assurance !== "hardened")
+        throw new HardeningError("Parle did not verify hardened assurance after confirmation.");
+      state = this.transition(config, state, ["hardened_recovery_captured"], { assuranceVerified: true });
+      secureUnlink(outputPath(config, "totp-code.input"), "protected TOTP input");
+      return { action: "confirm_totp", state: state.phase, hardened: true, recoveryPath: outputPath(config, "recovery-codes.txt"), next: "Move the recovery-code batch to the human operator's protected destination, then run parle-hardening-secret ack-recovery-stored before finalizing." };
+    } catch (error) {
+      if (!sinkWritten)
+        try {
+          this.discardSink(config, sink);
+        } catch {
+        }
+      if (serverConfirmed && !sinkWritten) {
+        this.transition(config, state, ["provisioning_captured", "awaiting_confirmation"], { phase: "hardened_recovery_missing", recoveryCaptured: false, assuranceVerified: false });
+        try {
+          secureUnlink(outputPath(config, "totp-code.input"), "protected TOTP input");
+        } catch {
+        }
+      } else if (sinkWritten) {
+      } else if (isAmbiguous(error)) {
+        this.transition(config, state, ["provisioning_captured", "awaiting_confirmation"], { phase: "confirm_outcome_unknown" });
+        try {
+          secureUnlink(outputPath(config, "totp-code.input"), "protected TOTP input");
+        } catch {
+        }
+      } else if (error instanceof HardeningHttpError && error.status === 403) {
+        this.transition(config, state, ["provisioning_captured", "awaiting_confirmation"], { sudoNeedsRefresh: true });
+      } else {
+        try {
+          secureUnlink(outputPath(config, "totp-code.input"), "protected TOTP input");
+        } catch {
+        }
+        this.transition(config, state, ["provisioning_captured", "awaiting_confirmation"], { phase: "awaiting_confirmation" });
+      }
+      throw error;
+    } finally {
+      clearBuffer(code);
+    }
+  }
+  async recoverConfirm(config) {
+    let state = this.readState(config);
+    this.assertBound(config, state);
+    if (!["confirm_outcome_unknown", "hardened_recovery_missing", "recovery_regeneration_outcome_unknown", "hardened_recovery_captured"].includes(state.phase))
+      throw new HardeningError("Confirmation recovery is not valid in the current hardening state.");
+    const whoami = await this.whoami(config);
+    if (whoami.assurance === "unhardened") {
+      if (state.phase !== "confirm_outcome_unknown")
+        throw new HardeningError("Parle hardening state conflicts with unhardened assurance. Stop and reconcile manually.");
+      state = this.transition(config, state, ["confirm_outcome_unknown"], { phase: "awaiting_confirmation", recoveryCaptured: false, assuranceVerified: false });
+      return { action: "recover_confirm", state: state.phase, hardened: false, next: "Keep the captured provisioning URI. Stage a fresh human-only TOTP code with parle-hardening-secret totp-code, then run parle_harden_account confirm_totp with explicit confirmation." };
+    }
+    const existing = outputPath(config, "recovery-codes.txt");
+    if (state.recoveryCaptured && existsSync2(existing)) {
+      assertSecureFile(existing, "protected recovery codes");
+      state = this.transition(config, state, [state.phase], { phase: "hardened_recovery_captured", assuranceVerified: true });
+      return { action: "recover_confirm", state: state.phase, hardened: true, recoveryPath: existing, next: "Move recovery codes to protected storage, acknowledge with parle-hardening-secret ack-recovery-stored, then finalize." };
+    }
+    const code = this.readSecret(config, "totp-code.input");
+    const sink = this.openSink(config, "recovery-codes.txt");
+    let sudoOpened = false;
+    try {
+      await this.openTotpSudo(config, code);
+      sudoOpened = true;
+      secureUnlink(outputPath(config, "totp-code.input"), "protected TOTP input");
+      const response = await this.request(config, "/v/auth/recovery-codes/regenerate", "POST", {});
+      if (response.status !== 200)
+        throw new HardeningError("Parle hardening received an invalid recovery regeneration response.");
+      const recovery = validRecoveryCodes(response.json);
+      const payload = Buffer.from(recovery.join("\n") + "\n", "utf8");
+      recovery.fill("");
+      this.writeSink(config, sink, payload);
+      state = this.transition(config, state, ["confirm_outcome_unknown", "hardened_recovery_missing", "recovery_regeneration_outcome_unknown", "hardened_recovery_captured"], { phase: "hardened_recovery_captured", recoveryCaptured: true, assuranceVerified: true });
+      return { action: "recover_confirm", state: state.phase, hardened: true, recoveryPath: outputPath(config, "recovery-codes.txt"), next: "Only this newly captured recovery-code batch is valid. Move it to protected storage, acknowledge with parle-hardening-secret ack-recovery-stored, then finalize." };
+    } catch (error) {
+      try {
+        this.discardSink(config, sink);
+      } catch {
+      }
+      if (!isAmbiguous(error)) {
+        try {
+          secureUnlink(outputPath(config, "totp-code.input"), "protected TOTP input");
+        } catch {
+        }
+      }
+      this.transition(config, state, ["confirm_outcome_unknown", "hardened_recovery_missing", "recovery_regeneration_outcome_unknown", "hardened_recovery_captured"], {
+        phase: sudoOpened ? "recovery_regeneration_outcome_unknown" : "hardened_recovery_missing",
+        recoveryCaptured: false,
+        assuranceVerified: false
+      });
+      throw error;
+    } finally {
+      clearBuffer(code);
+    }
+  }
+  async finalize(config) {
+    let state = this.readState(config);
+    this.assertBound(config, state);
+    if (state.phase !== "hardened_recovery_captured" || !state.recoveryCaptured || !state.assuranceVerified)
+      throw new HardeningError("Hardening cannot finalize until hardened assurance and durable recovery capture are verified.");
+    const ack = join2(ceremonyPath(config), ACK_FILE);
+    assertSecureFile(ack, "recovery storage acknowledgement");
+    const parsed = parseJson(readFileSync2(ack, "utf8"));
+    if (!parsed || typeof parsed !== "object" || parsed.schemaVersion !== 1 || typeof parsed.acknowledgedAt !== "string")
+      throw new HardeningError("Recovery storage acknowledgement is invalid.");
+    for (const file of SECRET_FILES)
+      secureUnlink(outputPath(config, file), `protected hardening ${file}`);
+    secureUnlink(ack, "recovery storage acknowledgement");
+    state = this.transition(config, state, ["hardened_recovery_captured"], { phase: "finalized" });
+    return { action: "finalize", state: state.phase, complete: true, next: "Hardening ceremony complete. The local secret copies were removed after the human acknowledgement." };
+  }
+};
+
+// ../client/dist/account.js
+var DEFAULT_API_BASE2 = "https://api.parle.sh";
+var MAX_RESPONSE_BYTES2 = 64 * 1024;
+var MAX_HANDOFF_BYTES = 32 * 1024;
+var UUID_RE2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var INVITE_SECRET_RE = /^parle_inv_\S{16,256}$/;
+var INVITE_CODE_RE = /^[A-Z0-9]{6,32}$/;
+var RESERVED_HANDLES = /* @__PURE__ */ new Set(["admin", "agent", "agents", "api", "me", "null", "parle", "room", "rooms", "root", "support", "system", "www"]);
+var MINT_DENIAL_NEXT_ACTION = {
+  unhardened: "set a password, then enroll a second factor",
+  cooldown: "wait for the post-recovery cooldown to lapse",
+  account_restricted: "this account cannot expand its reach right now"
+};
+function parseDotEnv2(text) {
+  const values = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#"))
+      continue;
+    const equals = line.indexOf("=");
+    if (equals <= 0)
+      continue;
+    const key = line.slice(0, equals).trim();
+    let value = line.slice(equals + 1).trim();
+    if (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'"))
+      value = value.slice(1, -1);
+    values[key] = value;
+  }
+  return values;
+}
 function safeFile(path, label, allowSymlink) {
-  const link = lstatSync2(path);
+  const link = lstatSync3(path);
   if (!allowSymlink && link.isSymbolicLink())
     throw new Error(`${label} must not be a symbolic link: ${path}`);
   const stat = link.isSymbolicLink() ? statSync2(path) : link;
@@ -263,7 +1197,7 @@ function assertGitSafeDirectory(path) {
   }
 }
 function safeDirectory(path, label) {
-  const link = lstatSync2(path);
+  const link = lstatSync3(path);
   if (link.isSymbolicLink() || !link.isDirectory())
     throw new Error(`${label} must be a real directory: ${path}`);
   if (process.platform !== "win32") {
@@ -275,12 +1209,12 @@ function safeDirectory(path, label) {
   return realpathSync(path);
 }
 function inviteDirectory(config, create) {
-  const directory = join2(config.stateDir, "invites");
+  const directory = join3(config.stateDir, "invites");
   if (create) {
-    mkdirSync(directory, { recursive: true, mode: 448 });
+    mkdirSync2(directory, { recursive: true, mode: 448 });
     if (process.platform !== "win32")
       chmodSync(directory, 448);
-  } else if (!existsSync2(directory)) {
+  } else if (!existsSync3(directory)) {
     throw new Error(`Private Parle invite directory does not exist: ${directory}`);
   }
   safeDirectory(directory, "Parle invite directory");
@@ -291,9 +1225,9 @@ function readBounded(path, maxBytes, label) {
   const stat = statSync2(path);
   if (stat.size > maxBytes)
     throw new Error(`${label} exceeds ${maxBytes} bytes: ${path}`);
-  return readFileSync2(path, "utf8");
+  return readFileSync3(path, "utf8");
 }
-function firstValue(key, env, dotEnv) {
+function firstValue2(key, env, dotEnv) {
   return env[key] || dotEnv[key] || void 0;
 }
 function assertSafeBase(base, env) {
@@ -308,13 +1242,13 @@ function assertSafeBase(base, env) {
   return url.origin;
 }
 function resolveAccountConfig(cwd, env) {
-  const dotEnvPath = join2(cwd, ".env");
-  const dotEnv = existsSync2(dotEnvPath) ? parseDotEnv(readBounded(dotEnvPath, MAX_HANDOFF_BYTES, "Parle project environment")) : {};
-  const profilesOverride = firstValue("PARLE_PROFILES_PATH", env, dotEnv);
+  const dotEnvPath = join3(cwd, ".env");
+  const dotEnv = existsSync3(dotEnvPath) ? parseDotEnv2(readBounded(dotEnvPath, MAX_HANDOFF_BYTES, "Parle project environment")) : {};
+  const profilesOverride = firstValue2("PARLE_PROFILES_PATH", env, dotEnv);
   const catalogPath = resolveProfileCatalogPath(profilesOverride, cwd, env);
-  const sessionPath = join2(dirname2(catalogPath), "session");
-  let sessionCookie = firstValue("PARLE_SESSION_COOKIE", env, dotEnv);
-  if (!sessionCookie && existsSync2(sessionPath)) {
+  const sessionPath = join3(dirname3(catalogPath), "session");
+  let sessionCookie = firstValue2("PARLE_SESSION_COOKIE", env, dotEnv);
+  if (!sessionCookie && existsSync3(sessionPath)) {
     safeFile(sessionPath, "Parle human session file", true);
     sessionCookie = readBounded(sessionPath, 8192, "Parle human session file").trim();
   }
@@ -322,15 +1256,15 @@ function resolveAccountConfig(cwd, env) {
     throw new Error(`Parle human session is not configured. Run parle_login complete or mint-from-session so ${sessionPath} exists.`);
   if (/\r|\n/.test(sessionCookie))
     throw new Error("Parle human session cookie contains invalid control characters.");
-  let configuredApiBase = firstValue("PARLE_API_BASE", env, dotEnv);
-  if (!configuredApiBase && existsSync2(catalogPath)) {
-    const selectedProfile = firstValue("PARLE_PROFILE", env, dotEnv) || (profileCatalogHasProfile("default", catalogPath) ? "default" : void 0);
+  let configuredApiBase = firstValue2("PARLE_API_BASE", env, dotEnv);
+  if (!configuredApiBase && existsSync3(catalogPath)) {
+    const selectedProfile = firstValue2("PARLE_PROFILE", env, dotEnv) || (profileCatalogHasProfile("default", catalogPath) ? "default" : void 0);
     if (selectedProfile)
       configuredApiBase = loadProfile(selectedProfile, catalogPath).apiBase;
   }
-  const apiBase = assertSafeBase(configuredApiBase || DEFAULT_API_BASE, env);
+  const apiBase = assertSafeBase(configuredApiBase || DEFAULT_API_BASE2, env);
   const version = env.PARLE_VERSION || CONFORMANCE_PARLE_VERSION;
-  return { apiBase, version, sessionCookie, stateDir: dirname2(catalogPath), catalogPath };
+  return { apiBase, version, sessionCookie, stateDir: dirname3(catalogPath), catalogPath };
 }
 function validateUUID(raw, label) {
   const value = raw.trim().toLowerCase();
@@ -353,7 +1287,7 @@ function scrub(value, secrets) {
   safe = safe.replace(/parle_(?:inv|ses|agt)_[A-Za-z0-9._~-]+/g, "<redacted>");
   return safe;
 }
-function parseJson(text) {
+function parseJson2(text) {
   if (!text)
     return {};
   try {
@@ -404,27 +1338,27 @@ function validateProfileLabel(raw) {
   return value;
 }
 function ensureProfileSink(path) {
-  const directory = dirname2(path);
-  mkdirSync(directory, { recursive: true, mode: 448 });
-  const dir = lstatSync2(directory);
+  const directory = dirname3(path);
+  mkdirSync2(directory, { recursive: true, mode: 448 });
+  const dir = lstatSync3(directory);
   if (dir.isSymbolicLink() || !dir.isDirectory())
     throw new Error(`Parle profile directory must be a real directory: ${directory}`);
   if (process.platform !== "win32" && dir.uid !== process.getuid?.())
     throw new Error(`Parle profile directory must be owned by the current user: ${directory}`);
   if (process.platform !== "win32")
     chmodSync(directory, 448);
-  if (existsSync2(path))
+  if (existsSync3(path))
     safeFile(path, "Parle profile catalog", true);
-  const writePath = existsSync2(path) && lstatSync2(path).isSymbolicLink() ? realpathSync(path) : path;
-  const original = existsSync2(writePath) ? readFileSync2(writePath, "utf8") : "";
+  const writePath = existsSync3(path) && lstatSync3(path).isSymbolicLink() ? realpathSync(path) : path;
+  const original = existsSync3(writePath) ? readFileSync3(writePath, "utf8") : "";
   if (original)
     parseProfiles(original, path);
-  const probe = join2(directory, `.profiles-write-test-${process.pid}`);
+  const probe = join3(directory, `.profiles-write-test-${process.pid}`);
   try {
     writeFileSync(probe, "ok\n", { mode: 384, flag: "wx" });
   } finally {
     try {
-      unlinkSync(probe);
+      unlinkSync2(probe);
     } catch {
     }
   }
@@ -436,16 +1370,16 @@ function renderProfile(profile) {
     `room_id = ${profile.roomId}`,
     `agent_token = ${profile.agentToken}`,
     profile.agentTokenId ? `agent_token_id = ${profile.agentTokenId}` : void 0,
-    profile.apiBase && profile.apiBase !== DEFAULT_API_BASE ? `api_base = ${profile.apiBase}` : void 0,
-    profile.wakeBase && profile.wakeBase !== DEFAULT_API_BASE ? `wake_base = ${profile.wakeBase}` : void 0
+    profile.apiBase && profile.apiBase !== DEFAULT_API_BASE2 ? `api_base = ${profile.apiBase}` : void 0,
+    profile.wakeBase && profile.wakeBase !== DEFAULT_API_BASE2 ? `wake_base = ${profile.wakeBase}` : void 0
   ].filter(Boolean).join("\n") + "\n";
 }
 function publishNewProfile(path, original, profile) {
   const lockPath = `${path}.lock`;
   let lock;
   try {
-    lock = openSync(lockPath, "wx", 384);
-    const current = existsSync2(path) ? readFileSync2(path, "utf8") : "";
+    lock = openSync2(lockPath, "wx", 384);
+    const current = existsSync3(path) ? readFileSync3(path, "utf8") : "";
     if (current !== original)
       throw new Error("Parle profile catalog changed after preflight. No credential was published.");
     const profiles = current ? parseProfiles(current, path) : /* @__PURE__ */ new Map();
@@ -454,27 +1388,27 @@ function publishNewProfile(path, original, profile) {
     const separator = current.length === 0 || current.endsWith("\n") ? "" : "\n";
     const updated = current + separator + renderProfile(profile);
     parseProfiles(updated, path);
-    const temp = join2(dirname2(path), `.profiles.${process.pid}.${Date.now()}.tmp`);
+    const temp = join3(dirname3(path), `.profiles.${process.pid}.${Date.now()}.tmp`);
     try {
       writeFileSync(temp, updated, { mode: 384, flag: "wx" });
       if (process.platform !== "win32")
         chmodSync(temp, 384);
-      renameSync(temp, path);
+      renameSync2(temp, path);
       if (process.platform !== "win32")
         chmodSync(path, 384);
     } finally {
       try {
-        if (existsSync2(temp))
-          unlinkSync(temp);
+        if (existsSync3(temp))
+          unlinkSync2(temp);
       } catch {
       }
     }
   } finally {
     if (lock !== void 0)
-      closeSync(lock);
+      closeSync2(lock);
     try {
-      if (existsSync2(lockPath))
-        unlinkSync(lockPath);
+      if (existsSync3(lockPath))
+        unlinkSync2(lockPath);
     } catch {
     }
   }
@@ -515,10 +1449,10 @@ var ParleAccountClient = class {
     }
     const response = await this.fetchImpl(new URL(path, config.apiBase), { method: options.method || "GET", headers, body, signal: options.signal });
     const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.byteLength > MAX_RESPONSE_BYTES)
-      throw new Error(`Parle API response exceeded ${MAX_RESPONSE_BYTES} bytes.`);
+    if (buffer.byteLength > MAX_RESPONSE_BYTES2)
+      throw new Error(`Parle API response exceeded ${MAX_RESPONSE_BYTES2} bytes.`);
     const text = buffer.toString("utf8");
-    const json = parseJson(text);
+    const json = parseJson2(text);
     if (!response.ok) {
       const error = json?.error && typeof json.error === "object" ? json.error : {};
       const rawReason = typeof error.reason === "string" ? error.reason : "";
@@ -538,6 +1472,9 @@ var ParleAccountClient = class {
     if (!json || typeof json !== "object")
       throw new Error("Parle API returned an invalid JSON response.");
     return json;
+  }
+  async hardenAccount(params) {
+    return new ParleHardeningClient({ cwd: this.cwd, env: this.env, fetch: this.fetchImpl, now: this.now }).hardenAccount(params);
   }
   async mintPrincipalInvite(params, signal) {
     if (params.confirmMutation !== true || !params.reason?.trim())
@@ -587,14 +1524,14 @@ var ParleAccountClient = class {
     if (!isAbsolute2(path))
       throw new Error("handoffPath must be an absolute path.");
     const directory = inviteDirectory(config, false);
-    if (!existsSync2(path))
+    if (!existsSync3(path))
       throw new Error(`Parle invite handoff does not exist in the private invite directory: ${path}`);
     safeFile(path, "Parle invite handoff", false);
-    if (realpathSync(dirname2(path)) !== directory || dirname2(realpathSync(path)) !== directory)
+    if (realpathSync(dirname3(path)) !== directory || dirname3(realpathSync(path)) !== directory)
       throw new Error("handoffPath must resolve directly inside the private Parle invite directory.");
     if (!UUID_RE2.test(basename(path, ".json")) || !path.endsWith(".json"))
       throw new Error("Parle invite handoff filename must be <invite-id>.json.");
-    const parsed = parseJson(readBounded(path, MAX_HANDOFF_BYTES, "Parle invite handoff"));
+    const parsed = parseJson2(readBounded(path, MAX_HANDOFF_BYTES, "Parle invite handoff"));
     if (!parsed || typeof parsed !== "object" || parsed.schemaVersion !== 1 || parsed.kind !== "parle-principal-invite")
       throw new Error("Parle invite handoff schema is invalid.");
     const handoff = {
@@ -670,7 +1607,7 @@ var ParleAccountClient = class {
     let cleanupWarning;
     if (deleteHandoff) {
       try {
-        unlinkSync(params.handoffPath);
+        unlinkSync2(params.handoffPath);
         handoffDeleted = true;
       } catch {
         cleanupWarning = `Claim succeeded, but the private handoff could not be deleted. Remove it manually: ${params.handoffPath}`;
@@ -829,7 +1766,7 @@ var ParleAccountClient = class {
       const activeSeat = agentSeats2.find((item) => item?.agent_id === selected.agentId);
       const tokensResponse2 = await this.request(config, `/v/agents/${encodeURIComponent(selected.agentId)}/tokens`, { signal });
       const tokens2 = Array.isArray(tokensResponse2.tokens) ? tokensResponse2.tokens : [];
-      const profiles2 = existsSync2(config.catalogPath) ? parseProfiles(readFileSync2(config.catalogPath, "utf8"), config.catalogPath) : /* @__PURE__ */ new Map();
+      const profiles2 = existsSync3(config.catalogPath) ? parseProfiles(readFileSync3(config.catalogPath, "utf8"), config.catalogPath) : /* @__PURE__ */ new Map();
       const activeTokenIds2 = new Set(tokens2.filter((token) => token?.agent_id === selected.agentId && token?.room_id === invitation.roomId && token?.revoked_at == null && Array.isArray(token?.scopes) && token.scopes.includes("participate")).map((token) => token.agent_token_id));
       const compatible2 = [...profiles2.values()].find((profile) => profile.roomId === invitation.roomId && profile.agentTokenId && activeTokenIds2.has(profile.agentTokenId));
       return {
@@ -869,7 +1806,7 @@ var ParleAccountClient = class {
     const tokensResponse = await this.request(config, `/v/agents/${encodeURIComponent(selected.agentId)}/tokens`, { signal });
     const tokens = Array.isArray(tokensResponse.tokens) ? tokensResponse.tokens : [];
     const catalogPath = config.catalogPath;
-    const profiles = existsSync2(catalogPath) ? parseProfiles(readFileSync2(catalogPath, "utf8"), catalogPath) : /* @__PURE__ */ new Map();
+    const profiles = existsSync3(catalogPath) ? parseProfiles(readFileSync3(catalogPath, "utf8"), catalogPath) : /* @__PURE__ */ new Map();
     const activeTokenIds = new Set(tokens.filter((token) => token?.agent_id === selected.agentId && token?.room_id === invitation.roomId && token?.revoked_at == null && Array.isArray(token?.scopes) && token.scopes.includes("participate")).map((token) => token.agent_token_id));
     const compatible = [...profiles.values()].find((profile) => profile.roomId === invitation.roomId && profile.agentTokenId && activeTokenIds.has(profile.agentTokenId));
     if (compatible) {
@@ -968,7 +1905,7 @@ var ParleAccountClient = class {
 };
 
 // ../client/dist/index.js
-var DEFAULT_API_BASE2 = "https://api.parle.sh";
+var DEFAULT_API_BASE3 = "https://api.parle.sh";
 var DEFAULT_VERSION = CONFORMANCE_PARLE_VERSION;
 var READ_LIMIT_BYTES = 256 * 1024;
 async function performProfileSwitch(plan) {
@@ -1057,7 +1994,7 @@ function summarizeSendDelivery(details) {
 // src/index.ts
 import { Type } from "typebox";
 var EXTENSION_ID = "25-parle";
-var PI_EXTENSION_VERSION = "0.1.25";
+var PI_EXTENSION_VERSION = "0.1.26";
 var RUNTIME_SCHEMA_VERSION2 = 1;
 var AI_GUIDANCE_URL = "https://ai.parle.sh";
 var API_LLMS_URL = "https://api.parle.sh/llms.txt";
@@ -1100,8 +2037,8 @@ function configForLiveRuntime(resolved) {
   return runtime.bootstrapped && liveConfig ? liveConfig : resolved;
 }
 function readKeyValueFile(path) {
-  if (!existsSync3(path)) return {};
-  return parseKeyValueFile(readFileSync3(path, "utf8"));
+  if (!existsSync4(path)) return {};
+  return parseKeyValueFile(readFileSync4(path, "utf8"));
 }
 function firstConfigValue(candidates) {
   return candidates.find((candidate) => candidate && candidate.value !== "");
@@ -1111,7 +2048,7 @@ function makeValue(value, source, key, secret = false, warning) {
   return { value, source, key, secret, warning };
 }
 function resolveConfig(cwd, profileOverride = activeProfileOverride) {
-  const projectEnv = readKeyValueFile(join3(cwd, ".env"));
+  const projectEnv = readKeyValueFile(join4(cwd, ".env"));
   const sourceCandidates = (key, secret = false) => [
     makeValue(process.env[key], "env", key, secret),
     makeValue(projectEnv[key], "project_env", key, secret, secret ? "secret comes from project .env" : void 0)
@@ -1161,7 +2098,7 @@ function resolveConfig(cwd, profileOverride = activeProfileOverride) {
   const cfg = {
     enabled,
     enabledInput,
-    apiBase: profile ? fromProfile("PARLE_API_BASE", profile.apiBase, DEFAULT_API_BASE2) : pick("PARLE_API_BASE", DEFAULT_API_BASE2),
+    apiBase: profile ? fromProfile("PARLE_API_BASE", profile.apiBase, DEFAULT_API_BASE3) : pick("PARLE_API_BASE", DEFAULT_API_BASE3),
     version: pickVersion(),
     roomId: profile ? fromProfile("PARLE_ROOM_ID", profile.roomId) : pick("PARLE_ROOM_ID", void 0),
     roomHandle: profile ? void 0 : pick("PARLE_ROOM_HANDLE", void 0),
@@ -1173,7 +2110,7 @@ function resolveConfig(cwd, profileOverride = activeProfileOverride) {
     sessionCookie: firstConfigValue(sourceCandidates("PARLE_SESSION_COOKIE", true)) || makeValue(readSessionCookieFile(sessionCookieFilePath(catalogPath)), "session_file", "PARLE_SESSION_COOKIE", true) || { value: "", source: "default", key: "PARLE_SESSION_COOKIE", secret: true },
     sessionAlias: pick("PARLE_SESSION_ALIAS", void 0),
     watchEnabled: pick("PARLE_WATCH_ENABLED", "1"),
-    wakeBase: profile ? fromProfile("PARLE_WAKE_BASE", profile.wakeBase, DEFAULT_API_BASE2) : pick("PARLE_WAKE_BASE", void 0),
+    wakeBase: profile ? fromProfile("PARLE_WAKE_BASE", profile.wakeBase, DEFAULT_API_BASE3) : pick("PARLE_WAKE_BASE", void 0),
     profile: profileSelector,
     profilesPath: { value: catalogPath, source: catalogOverride ? catalogOverride.source : "default", key: "PARLE_PROFILES_PATH" },
     warnings
@@ -1256,7 +2193,7 @@ function assertSafeBase2(raw) {
   if (url.hostname !== "parle.sh" && !url.hostname.endsWith(".parle.sh")) throw new Error("Parle API base must be api.parle.sh or another parle.sh host");
 }
 function requestUrl(cfg, params) {
-  const base = cfg.apiBase.value || DEFAULT_API_BASE2;
+  const base = cfg.apiBase.value || DEFAULT_API_BASE3;
   const raw = params.url || new URL(params.path || "/", base).toString();
   const url = new URL(raw, base);
   assertSafeBase2(url.toString());
@@ -1272,23 +2209,23 @@ async function fetchText(url, limit, signal) {
 function mutationScope(method, pathOrUrl) {
   const upper = method.toUpperCase();
   try {
-    const url = new URL(pathOrUrl, DEFAULT_API_BASE2);
+    const url = new URL(pathOrUrl, DEFAULT_API_BASE3);
     return `${upper} ${url.pathname}`;
   } catch {
     return `${upper} ${pathOrUrl.split("?")[0]}`;
   }
 }
 function sessionCookieFilePath(catalogPath) {
-  return join3(dirname3(catalogPath), "session");
+  return join4(dirname4(catalogPath), "session");
 }
 function readSessionCookieFile(path) {
   try {
-    if (!existsSync3(path)) return void 0;
-    const link = lstatSync3(path);
+    if (!existsSync4(path)) return void 0;
+    const link = lstatSync4(path);
     const stat = link.isSymbolicLink() ? statSync3(path) : link;
     if (!stat.isFile()) return void 0;
     if (process.platform !== "win32" && (stat.uid !== process.getuid?.() || (stat.mode & 63) !== 0)) return void 0;
-    const value = readFileSync3(path, "utf8").trim();
+    const value = readFileSync4(path, "utf8").trim();
     return value || void 0;
   } catch {
     return void 0;
@@ -1298,16 +2235,16 @@ function writeSessionCookieFile(catalogPath, cookie) {
   ensureProfileDirectory(catalogPath);
   const path = sessionCookieFilePath(catalogPath);
   const writePath = safeProfileWritePath(path);
-  const tempPath = join3(dirname3(writePath), `.session.${process.pid}.${Date.now()}.tmp`);
+  const tempPath = join4(dirname4(writePath), `.session.${process.pid}.${Date.now()}.tmp`);
   try {
     writeFileSync2(tempPath, `${cookie}
 `, { mode: 384 });
     chmodSync2(tempPath, 384);
-    renameSync2(tempPath, writePath);
+    renameSync3(tempPath, writePath);
     chmodSync2(writePath, 384);
   } catch (error) {
     try {
-      if (existsSync3(tempPath)) unlinkSync2(tempPath);
+      if (existsSync4(tempPath)) unlinkSync3(tempPath);
     } catch {
     }
     throw error;
@@ -1315,10 +2252,10 @@ function writeSessionCookieFile(catalogPath, cookie) {
   return path;
 }
 function runtimeDirPath(cwd) {
-  return join3(cwd, ".parle", "runtime");
+  return join4(cwd, ".parle", "runtime");
 }
 function runtimeFilePath(cwd) {
-  return join3(runtimeDirPath(cwd), `${process.pid}.json`);
+  return join4(runtimeDirPath(cwd), `${process.pid}.json`);
 }
 function processStartedAtIso2(now = /* @__PURE__ */ new Date()) {
   return new Date(now.getTime() - process.uptime() * 1e3).toISOString();
@@ -1341,9 +2278,9 @@ function pruneRuntimeFiles2(cwd, now = /* @__PURE__ */ new Date()) {
   }
   for (const name of names) {
     if (name.startsWith(".") || !name.endsWith(".json")) continue;
-    const path = join3(dir, name);
+    const path = join4(dir, name);
     try {
-      const snapshot = JSON.parse(readFileSync3(path, "utf8"));
+      const snapshot = JSON.parse(readFileSync4(path, "utf8"));
       if (snapshot?.pid === process.pid) continue;
       const expiresAt = Date.parse(snapshot?.expiresAt || "");
       const expired = !Number.isFinite(expiresAt) || expiresAt <= now.getTime();
@@ -1356,12 +2293,12 @@ function pruneRuntimeFiles2(cwd, now = /* @__PURE__ */ new Date()) {
 }
 function writeRuntimeFile2(cwd, snapshot) {
   const dir = runtimeDirPath(cwd);
-  mkdirSync2(dir, { recursive: true, mode: 448 });
+  mkdirSync3(dir, { recursive: true, mode: 448 });
   chmodSync2(dir, 448);
-  const tmp = join3(dir, `.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  const tmp = join4(dir, `.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
   writeFileSync2(tmp, JSON.stringify(snapshot, null, 2) + "\n", { mode: 384 });
   chmodSync2(tmp, 384);
-  renameSync2(tmp, runtimeFilePath(cwd));
+  renameSync3(tmp, runtimeFilePath(cwd));
 }
 function removeRuntimeFile2(cwd) {
   rmSync(runtimeFilePath(cwd), { force: true });
@@ -1395,9 +2332,9 @@ function assertProfileLabel(label) {
   }
 }
 function ensureProfileDirectory(path) {
-  const dir = dirname3(path);
-  if (!existsSync3(dir)) mkdirSync2(dir, { recursive: true, mode: 448 });
-  const link = lstatSync3(dir);
+  const dir = dirname4(path);
+  if (!existsSync4(dir)) mkdirSync3(dir, { recursive: true, mode: 448 });
+  const link = lstatSync4(dir);
   if (!link.isSymbolicLink() && !link.isDirectory()) throw new Error(`Refusing to write Parle profiles because ${dir} is not a regular directory.`);
   const writeDir = link.isSymbolicLink() ? realpathSync2(dir) : dir;
   const target = statSync3(writeDir);
@@ -1407,8 +2344,8 @@ function ensureProfileDirectory(path) {
   return writeDir;
 }
 function safeProfileWritePath(path) {
-  if (!existsSync3(path)) return path;
-  const link = lstatSync3(path);
+  if (!existsSync4(path)) return path;
+  const link = lstatSync4(path);
   if (process.platform !== "win32" && link.uid !== process.getuid?.()) throw new Error(`Refusing to write Parle profiles because ${path} is not owned by the current user.`);
   if (!link.isSymbolicLink() && !link.isFile()) throw new Error(`Refusing to write Parle profiles because ${path} is not a regular file.`);
   const writePath = link.isSymbolicLink() ? realpathSync2(path) : path;
@@ -1435,27 +2372,27 @@ function renderedProfileSection(profile) {
     `room_id = ${profile.roomId}`,
     `agent_token = ${profile.agentToken}`,
     profile.agentTokenId ? `agent_token_id = ${profile.agentTokenId}` : void 0,
-    profile.apiBase && profile.apiBase !== DEFAULT_API_BASE2 ? `api_base = ${profile.apiBase}` : void 0,
-    profile.wakeBase && profile.wakeBase !== DEFAULT_API_BASE2 ? `wake_base = ${profile.wakeBase}` : void 0
+    profile.apiBase && profile.apiBase !== DEFAULT_API_BASE3 ? `api_base = ${profile.apiBase}` : void 0,
+    profile.wakeBase && profile.wakeBase !== DEFAULT_API_BASE3 ? `wake_base = ${profile.wakeBase}` : void 0
   ].filter(Boolean).join("\n") + "\n";
 }
 function preflightProfileSink(label, force, path) {
   assertProfileLabel(label);
   const writeDir = ensureProfileDirectory(path);
-  const writePath = safeProfileWritePath(join3(writeDir, basename2(path)));
-  const text = existsSync3(writePath) ? readFileSync3(writePath, "utf8") : "";
+  const writePath = safeProfileWritePath(join4(writeDir, basename2(path)));
+  const text = existsSync4(writePath) ? readFileSync4(writePath, "utf8") : "";
   const profiles = text ? parseProfiles(text, path) : /* @__PURE__ */ new Map();
   const exists = Boolean(profileSectionRange(text, label));
   if (exists && !force) throw new Error(`Parle profile ${label} already exists in ${path}. Pass force=true to replace only that profile.`);
-  const probe = join3(dirname3(writePath), `.profiles-write-test-${process.pid}`);
+  const probe = join4(dirname4(writePath), `.profiles-write-test-${process.pid}`);
   writeFileSync2(probe, "ok\n", { mode: 384 });
   chmodSync2(probe, 384);
-  unlinkSync2(probe);
+  unlinkSync3(probe);
   return { path, writePath, exists, priorAgentTokenId: profiles.get(label)?.agentTokenId };
 }
 function writeProfile(profile, force, catalogPath) {
   const preflight = preflightProfileSink(profile.name, force, catalogPath);
-  const original = existsSync3(preflight.writePath) ? readFileSync3(preflight.writePath, "utf8") : "";
+  const original = existsSync4(preflight.writePath) ? readFileSync4(preflight.writePath, "utf8") : "";
   const range = profileSectionRange(original, profile.name);
   const section = renderedProfileSection(profile);
   let updated;
@@ -1466,15 +2403,15 @@ function writeProfile(profile, force, catalogPath) {
     updated = original + separator + section;
   }
   parseProfiles(updated, preflight.path);
-  const tempPath = join3(dirname3(preflight.writePath), `.profiles.${process.pid}.${Date.now()}.tmp`);
+  const tempPath = join4(dirname4(preflight.writePath), `.profiles.${process.pid}.${Date.now()}.tmp`);
   try {
     writeFileSync2(tempPath, updated, { mode: 384 });
     chmodSync2(tempPath, 384);
-    renameSync2(tempPath, preflight.writePath);
+    renameSync3(tempPath, preflight.writePath);
     chmodSync2(preflight.writePath, 384);
   } catch (error) {
     try {
-      if (existsSync3(tempPath)) unlinkSync2(tempPath);
+      if (existsSync4(tempPath)) unlinkSync3(tempPath);
     } catch {
     }
     throw error;
@@ -1705,7 +2642,7 @@ async function parleLogin(ctx, cfg, params, signal) {
       roomId: room.room_id,
       agentToken: token,
       agentTokenId: tokenBody.agent_token_id,
-      apiBase: cfg.apiBase.value || DEFAULT_API_BASE2,
+      apiBase: cfg.apiBase.value || DEFAULT_API_BASE3,
       wakeBase: cfg.wakeBase.value || void 0
     }, params.force === true, catalogPath);
   }
@@ -2483,7 +3420,7 @@ function statusDetails(ctx) {
     humanSession: {
       configured: Boolean(cfg.sessionCookie?.value),
       genericRequest: "unsupported",
-      supportedTools: ["parle_login", "parle_create_room", "parle_add_own_agent_seat", "parle_mint_principal_invite", "parle_claim_principal_invite", "parle_accept_room_invitation", "parle_connect_own_agent"],
+      supportedTools: ["parle_login", "parle_create_room", "parle_add_own_agent_seat", "parle_harden_account", "parle_mint_principal_invite", "parle_claim_principal_invite", "parle_accept_room_invitation", "parle_connect_own_agent"],
       note: "Human-session credentials are restricted to typed account-plane tools and are never available to parle_request."
     },
     sessionAlias: redactedValue(cfg.sessionAlias),
@@ -2529,7 +3466,7 @@ function statusDetails(ctx) {
       lastEndSessionAt: runtime.lastEndSessionAt,
       sessionHandle: runtime.sessionHandle ? "<redacted>" : void 0
     },
-    guidance: { ai: AI_GUIDANCE_URL, api: DEFAULT_API_BASE2 }
+    guidance: { ai: AI_GUIDANCE_URL, api: DEFAULT_API_BASE3 }
   };
 }
 function hasConnectionFailure() {
@@ -2798,6 +3735,20 @@ function parleExtension(pi) {
     }
   });
   pi.registerTool({
+    name: "parle_harden_account",
+    label: "Parle Harden Account",
+    description: "Run exactly one bounded human account-hardening transition. This typed tool accepts no password, OTP, recovery code, cookie, provisioning URI, or filesystem path and never starts the human-only helper. The person must run parle-hardening-secret themselves in a separate terminal with scrollback and recording disabled. Mutations require confirmMutation=true and a reason.",
+    parameters: Type.Object({
+      action: Type.Unsafe({ type: "string", enum: ["status", "prepare", "refresh_sudo", "enroll_totp", "confirm_totp", "recover_confirm", "finalize"] }),
+      confirmMutation: Type.Optional(Type.Boolean({ description: "Required for every action except status." })),
+      reason: Type.Optional(Type.String({ description: "Required explanation for each mutation." }))
+    }),
+    async execute(_id, params, _signal, _update, ctx) {
+      lastCtx = ctx;
+      return formatResult(await accountClient(ctx.cwd || process.cwd()).hardenAccount(params));
+    }
+  });
+  pi.registerTool({
     name: "parle_mint_principal_invite",
     label: "Parle Mint Principal Invite",
     description: "Mint one registered-principal ordinary-seat invitation through the fixed human-session room endpoint. The immutable principal UUID is authoritative and principalHandle is a confirmation label. Returns a non-secret canonical locator for out-of-band sharing; possession grants no authority. A definite human account-policy 403 may include a coarse reason and next action; follow it and do not retry until the operator resolves it.",
@@ -2866,7 +3817,7 @@ function parleExtension(pi) {
   pi.registerTool({
     name: "parle_request",
     label: "Parle Request",
-    description: "Generic guarded request to allowlisted Parle URLs with redaction, response caps, agent-token or unauthenticated auth modes, and mutation confirmation. Human-session auth is intentionally unsupported here; use typed account-plane tools such as parle_login, parle_create_room, parle_add_own_agent_seat, parle_mint_principal_invite, and parle_claim_principal_invite. Prefer parle_send for message submits because it supplies Idempotency-Key and direct addressing correctly.",
+    description: "Generic guarded request to allowlisted Parle URLs with redaction, response caps, agent-token or unauthenticated auth modes, and mutation confirmation. Human-session auth is intentionally unsupported here; use typed account-plane tools such as parle_login, parle_create_room, parle_add_own_agent_seat, parle_harden_account, parle_mint_principal_invite, and parle_claim_principal_invite. Prefer parle_send for message submits because it supplies Idempotency-Key and direct addressing correctly.",
     parameters: Type.Object({
       method: Type.Optional(Type.String()),
       path: Type.Optional(Type.String()),

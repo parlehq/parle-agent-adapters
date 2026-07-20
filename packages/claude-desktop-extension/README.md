@@ -14,6 +14,10 @@ Claude Desktop collects these values through the MCPB user configuration form:
 
 Desktop setup is env-only in v1. Project `.env` discovery is not documented as a supported Desktop setup path because Claude Desktop controls the server working directory.
 
+## Account hardening
+
+`parle_harden_account` accepts no password, OTP, recovery code, cookie, URI, or arbitrary path and never launches the human helper. The account owner must run `parle-hardening-secret` independently in a separate controlling terminal. Disable terminal scrollback and recording before displaying a provisioning QR. Follow the [operator ceremony](../../docs/account-hardening-ceremony.md).
+
 ## Validation
 
 Run from the repo root:

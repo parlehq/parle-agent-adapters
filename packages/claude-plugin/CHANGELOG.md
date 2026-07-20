@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.5.25 (2026-07-19)
+
+Bundle `parle_harden_account` and the human-only hardening ceremony guidance. The MCP orchestrator never launches the secret helper.
+
 ## 0.5.24 (2026-07-19)
 
 Make human invitation-mint policy denials actionable with coarse, validated remediation hints while preserving no-retry behavior.

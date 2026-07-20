@@ -3,6 +3,7 @@ import { chmodSync, closeSync, existsSync, linkSync, lstatSync, mkdirSync, openS
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { CONFORMANCE_PARLE_VERSION } from "./conformance-data.js";
 import { CredentialProfile, loadProfile, parseProfiles, profileCatalogHasProfile, resolveProfileCatalogPath } from "./profiles.js";
+import { ParleHardeningClient, type HardenAccountParams } from "./hardening.js";
 
 const DEFAULT_API_BASE = "https://api.parle.sh";
 const MAX_RESPONSE_BYTES = 64 * 1024;
@@ -369,6 +370,13 @@ export class ParleAccountClient {
     }
     if (!json || typeof json !== "object") throw new Error("Parle API returned an invalid JSON response.");
     return json;
+  }
+
+  async hardenAccount(params: HardenAccountParams) {
+    // This is intentionally a direct delegation. The account-plane
+    // orchestrator never launches the human-only helper or accepts a secret
+    // or filesystem path; secret custody stays in hardening.ts.
+    return new ParleHardeningClient({ cwd: this.cwd, env: this.env, fetch: this.fetchImpl, now: this.now }).hardenAccount(params);
   }
 
   async mintPrincipalInvite(params: MintPrincipalInviteParams, signal?: AbortSignal) {

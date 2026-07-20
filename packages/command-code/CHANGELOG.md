@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.6
+
+- Refresh the shared MCP artifact with secret-safe `parle_harden_account`; the human helper remains separately launched.
+
 ## 0.1.5
 
 - Refresh the shared MCP artifact with structured human invitation-mint denial reasons and safe next actions. Command Code remains tools-only.

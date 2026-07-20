@@ -71,6 +71,19 @@
       "target"
     ]
   },
+  "parle_harden_account": {
+    "title": "Parle Harden Account",
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true
+    },
+    "input": [
+      "action",
+      "confirmMutation",
+      "reason"
+    ]
+  },
   "parle_inbox": {
     "title": "Parle Inbox",
     "annotations": {

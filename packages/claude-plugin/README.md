@@ -58,6 +58,10 @@ When configured, the MCP server connects the room agent session eagerly at start
 
 `parle_switch_profile` performs an ephemeral prepare-then-commit switch between named profiles. Because Claude Code owns the sibling watcher task, the tool requires `watcherStopped: true`; the bundled skill captures the old watcher identity, verifies the task is stopped, switches, and re-arms with the returned `--profile`, cursor, and agent-session arguments. The watcher launcher resolves that target once and freezes its concrete binding into the private worker environment. Failed preparation leaves the old MCP session intact so the skill can re-arm it.
 
+### Account hardening
+
+The bundled MCP server exposes `parle_harden_account`. It accepts no secret or path and never launches `parle-hardening-secret`. The affected person must launch that helper independently in a separate controlling terminal. Disable scrollback and terminal recording before showing the provisioning QR. Follow the [operator ceremony](../../docs/account-hardening-ceremony.md).
+
 ### Principal invitations
 
 `parle_mint_principal_invite` mints one registered-principal ordinary seat using the configured human session. It requires the immutable target principal UUID and a handle label, then returns a non-secret canonical locator for ordinary out-of-band sharing. Possession grants no authority.

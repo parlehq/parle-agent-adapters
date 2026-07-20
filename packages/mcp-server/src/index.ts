@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
-import { ParleAccountClient, ParleAgentClient, ParleApiError, ReadParams, SendParams, compactConnectionCardFromSummary, compactStatusCardFromStatus, redactString, resolveConfig, type AcceptRoomInvitationParams, type ClaimPrincipalInviteParams, type ConnectOwnAgentParams, type MintPrincipalInviteParams } from "@parlehq/agent-client";
+import { ParleAccountClient, ParleAgentClient, ParleApiError, ReadParams, SendParams, compactConnectionCardFromSummary, compactStatusCardFromStatus, redactString, resolveConfig, type AcceptRoomInvitationParams, type ClaimPrincipalInviteParams, type ConnectOwnAgentParams, type HardenAccountParams, type MintPrincipalInviteParams } from "@parlehq/agent-client";
 
 export type ParleMcpClientLike = {
   status(): unknown;
@@ -59,10 +59,11 @@ export type ParleAccountClientLike = {
   claimPrincipalInvite(params: ClaimPrincipalInviteParams): Promise<unknown>;
   acceptRoomInvitation(params: AcceptRoomInvitationParams): Promise<unknown>;
   connectOwnAgent(params: ConnectOwnAgentParams): Promise<unknown>;
+  hardenAccount(params: HardenAccountParams): Promise<unknown>;
 };
 
 export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgentClient(), accountClient: ParleAccountClientLike = new ParleAccountClient()) {
-  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.12" });
+  const server = new McpServer({ name: "parle-mcp-server", version: "0.1.13" });
 
   server.registerTool("parle_status", {
     title: "Parle Status",
@@ -118,6 +119,17 @@ export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgent
       } : { restartRequired: false },
     };
   }));
+
+  server.registerTool("parle_harden_account", {
+    title: "Parle Harden Account",
+    description: "Run one bounded, human-approved account hardening transition. This tool accepts no password, TOTP code, recovery code, session cookie, URI, or filesystem path and never launches the human-only parle-hardening-secret helper. Run that helper yourself in a separate terminal with terminal recording and scrollback disabled. Every mutation requires confirmMutation=true and a reason.",
+    inputSchema: {
+      action: z.enum(["status", "prepare", "refresh_sudo", "enroll_totp", "confirm_totp", "recover_confirm", "finalize"]),
+      confirmMutation: z.boolean().optional(),
+      reason: z.string().optional(),
+    },
+    annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  }, async (params) => safeTool(() => accountClient.hardenAccount(params as HardenAccountParams)));
 
   server.registerTool("parle_mint_principal_invite", {
     title: "Parle Mint Principal Invite",
@@ -211,7 +223,7 @@ export function createParleMcpServer(client: ParleMcpClientLike = new ParleAgent
 }
 
 export async function runStdio() {
-  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.12" } });
+  const client = new ParleAgentClient({ publishRuntime: { adapterName: "@parlehq/mcp-server", adapterVersion: "0.1.13" } });
   const server = createParleMcpServer(client);
   installLifecycleHandlers(client);
   await server.connect(new StdioServerTransport());

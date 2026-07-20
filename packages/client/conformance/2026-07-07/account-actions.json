@@ -1257,6 +1257,58 @@
       ]
     },
     {
+      "id": "view_recovery_codes",
+      "method": "GET",
+      "path": "/v/auth/recovery-codes",
+      "summary": "View the remaining recovery-code count.",
+      "description": "Human-session endpoint requiring a live step-up (sudo) grant. Returns only the remaining count; plaintext recovery codes are shown only when issued and cannot be retrieved later. Cache-Control is no-store.",
+      "auth": "human_session",
+      "responses": [
+        {
+          "status": 200,
+          "description": "Remaining recovery-code count; Cache-Control is no-store.",
+          "headers": [
+            {
+              "name": "Cache-Control",
+              "type": "string",
+              "required": true,
+              "description": "no-store"
+            }
+          ],
+          "example": {
+            "remaining": 8
+          }
+        }
+      ]
+    },
+    {
+      "id": "regenerate_recovery_codes",
+      "method": "POST",
+      "path": "/v/auth/recovery-codes/regenerate",
+      "summary": "Regenerate recovery codes.",
+      "description": "Human-session endpoint requiring a live step-up (sudo) grant. Atomically revokes every prior recovery-code batch and returns a replacement batch exactly once. The response contains secret material: write it directly to protected storage; never log, cache, or place it in model-visible output. Cache-Control is no-store.",
+      "auth": "human_session",
+      "responses": [
+        {
+          "status": 200,
+          "description": "Replacement recovery codes, shown exactly once; all prior codes are invalidated. Cache-Control is no-store.",
+          "headers": [
+            {
+              "name": "Cache-Control",
+              "type": "string",
+              "required": true,
+              "description": "no-store"
+            }
+          ],
+          "example": {
+            "recovery_codes": [
+              "\u003cone-time-recovery-code\u003e"
+            ]
+          }
+        }
+      ]
+    },
+    {
       "id": "begin_passkey_registration",
       "method": "POST",
       "path": "/v/auth/passkeys/register/begin",

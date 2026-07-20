@@ -17,6 +17,7 @@ const expectedTools = [
   "parle_connect",
   "parle_connect_own_agent",
   "parle_guidance",
+  "parle_harden_account",
   "parle_inbox",
   "parle_mint_principal_invite",
   "parle_read",
@@ -109,6 +110,7 @@ test("in-memory server maps read, send, and errors through fake client", async (
     switchProfile: async (profile) => { calls.push(["switch", profile]); return { switched: true, profile, cursor: 42, agentSessionId: "as-target", roomHandle: "target-room" }; },
   };
   const fakeAccount = {
+    hardenAccount: async (params) => { calls.push(["harden-account", params]); return { action: params.action, state: "needs_password", next: "human helper" }; },
     mintPrincipalInvite: async (params) => { calls.push(["mint-invite", params]); return { inviteId: "invite-1", handoffPath: "/private/invite.json" }; },
     claimPrincipalInvite: async (params) => { calls.push(["claim-invite", params]); return { action: params.action, roomId: "room-1" }; },
   };
@@ -133,6 +135,8 @@ test("in-memory server maps read, send, and errors through fake client", async (
     const switched = await client.callTool({ name: "parle_switch_profile", arguments: { profile: "target", watcherStopped: true } });
     assert.equal(switched.structuredContent.roomHandle, "target-room");
     assert.deepEqual(switched.structuredContent.watcher.launcherArgs, ["--profile", "target", "42", "as-target"]);
+    const hardening = await client.callTool({ name: "parle_harden_account", arguments: { action: "status" } });
+    assert.equal(hardening.structuredContent.state, "needs_password");
     const minted = await client.callTool({ name: "parle_mint_principal_invite", arguments: { roomId: "room-1", principalId: "principal-1", principalHandle: "kyle", confirmMutation: true, reason: "invite" } });
     assert.equal(minted.structuredContent.handoffPath, "/private/invite.json");
     const previewed = await client.callTool({ name: "parle_claim_principal_invite", arguments: { action: "preview", handoffPath: "/private/invite.json" } });
@@ -142,6 +146,7 @@ test("in-memory server maps read, send, and errors through fake client", async (
       ["read", { waitSeconds: 1 }],
       ["send", { body: "hello", to: "@p.a.s1", idempotencyKey: "idem-1" }],
       ["switch", "target"],
+      ["harden-account", { action: "status" }],
       ["mint-invite", { roomId: "room-1", principalId: "principal-1", principalHandle: "kyle", confirmMutation: true, reason: "invite" }],
       ["claim-invite", { action: "preview", handoffPath: "/private/invite.json" }],
     ]);
@@ -322,7 +327,7 @@ test("parle_status works against minimal fake clients without lifecycle methods"
   }
 });
 
-test("stdio server lists the thirteen tools and setup works without secrets", async () => {
+test("stdio server lists the fourteen tools and setup works without secrets", async () => {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [new URL("../dist/parle-mcp.js", import.meta.url).pathname],
@@ -345,6 +350,9 @@ test("stdio server lists the thirteen tools and setup works without secrets", as
     assert.match(read.description, /untrusted/);
     const guidance = tools.tools.find((tool) => tool.name === "parle_guidance");
     assert.equal(guidance.annotations.openWorldHint, undefined);
+    const harden = tools.tools.find((tool) => tool.name === "parle_harden_account");
+    assert.deepEqual(Object.keys(harden.inputSchema.properties).sort(), ["action", "confirmMutation", "reason"]);
+    assert.doesNotMatch(JSON.stringify(harden.inputSchema), /password|recovery|provisioning|path/i);
     const send = tools.tools.find((tool) => tool.name === "parle_send");
     assert.equal(send.annotations.openWorldHint, true);
   } finally {

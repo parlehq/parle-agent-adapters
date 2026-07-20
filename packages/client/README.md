@@ -66,3 +66,7 @@ token by replacing it in the profile, then restart processes that loaded it.
 Mint returns a non-secret target-session locator whose possession grants no authority. Acceptance uses the authenticated immutable target and remains separate from agent connection. The connection workflow selects exactly one owned durable agent, resumes missing seat and credential steps, and atomically publishes a no-clobber local profile without returning token material.
 
 Legacy private capability claims remain supported. They accept only an absolute owner-owned, non-symlink, bounded, mode-`0600` handoff file. Preview preserves it; complete deletes the recipient copy after confirmed success by default. Handoff content never selects the API host or local session source.
+
+## Human account hardening
+
+`ParleHardeningClient` backs the typed `parle_harden_account` adapters and the `parle-hardening-secret` binary. The orchestration surface accepts no secret or path and never launches the helper. The human runs the helper independently on a controlling TTY; password, TOTP, provisioning URI, and recovery-code custody remains in fixed `0700`/`0600` files beside the resolved profile catalog. See the [operator ceremony](../../docs/account-hardening-ceremony.md).

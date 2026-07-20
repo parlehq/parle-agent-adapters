@@ -24,6 +24,7 @@ try {
     "parle_connect",
     "parle_connect_own_agent",
     "parle_guidance",
+    "parle_harden_account",
     "parle_inbox",
     "parle_mint_principal_invite",
     "parle_read",
@@ -32,6 +33,9 @@ try {
     "parle_status",
     "parle_switch_profile",
   ]);
+  const harden = tools.tools.find((tool) => tool.name === "parle_harden_account");
+  assert.deepEqual(Object.keys(harden.inputSchema.properties).sort(), ["action", "confirmMutation", "reason"]);
+  assert.doesNotMatch(JSON.stringify(harden.inputSchema), /password|recovery|provisioning|path/i);
   const setup = await client.callTool({ name: "parle_setup", arguments: {} });
   assert.equal(setup.structuredContent.ok, false);
   assert.deepEqual(setup.structuredContent.missing, ["PARLE_ROOM_ID", "PARLE_ROOM_AGENT_TOKEN"]);

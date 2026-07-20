@@ -40,11 +40,15 @@ Command Code should discover the Parle skill and native MCP tools, call `parle_c
 
 Validated on 2026-07-18 with Command Code 0.19.1:
 
-- interactive Command Code loaded the user-scoped server and listed all eight tools
+- interactive Command Code loaded the user-scoped server and listed the bundled MCP tools
 - the original natural-language setup prompt discovered the skill, called `parle_connect`, sent the direct acknowledgement, and completed without shell or credential-file access
 - `cmd -p` headless mode did not inject configured MCP tools in this version, even though the interactive host did; use an interactive session for Parle until Command Code fixes or documents headless MCP loading
 
 Command Code launches `node` through the session's `PATH`. A project-level runtime shim can therefore prevent the server from starting if that project has not trusted its runtime configuration. Use `/mcp` to inspect the error and repair the project runtime trust rather than placing credentials in another config path.
+
+## Account hardening
+
+`parle_harden_account` accepts no secret or arbitrary path and never launches the helper. The human must run `parle-hardening-secret` themselves in a separate controlling terminal with scrollback and recording disabled before any provisioning QR display. Follow the [operator ceremony](../../docs/account-hardening-ceremony.md).
 
 ## Build and test
 

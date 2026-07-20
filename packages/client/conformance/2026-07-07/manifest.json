@@ -26,7 +26,7 @@
     {
       "name": "account_actions",
       "path": "account-actions.json",
-      "sha256": "69b2ef73c163406e3b1737ebfcbbda461123cb3e0cc41bd2ec603b06959447a6"
+      "sha256": "1b7d35b92627861d6c4a3377756f4d6055fe4354941240d73a45ac2ada2f7dca"
     },
     {
       "name": "room_actions",

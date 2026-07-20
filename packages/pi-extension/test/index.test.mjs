@@ -202,7 +202,7 @@ test("status publishes a display-safe runtime snapshot", async () => {
   assert.equal(snapshot.sessionAddress, "@p.a.raw-session");
   assert.equal(snapshot.roomId, "room-1");
   assert.equal(snapshot.roomHandle, "galexc-intercom");
-  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.25" });
+  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.26" });
   assert.equal(JSON.stringify(snapshot).includes("parle_ses_raw-session"), false);
 });
 
@@ -569,6 +569,8 @@ test("principal invite tools expose link-first mint and separate guided acceptan
   assert.equal(result.details.targetHandle, "kljensen");
   assert.equal(result.details.claimUrl, "https://api.parle.sh/join/019f7c00-0000-7000-8000-000000000010");
   assert.equal(result.details.sensitive, false);
+  assert.deepEqual(Object.keys(harness.tools.parle_harden_account.parameters.properties).sort(), ["action", "confirmMutation", "reason"]);
+  assert.doesNotMatch(JSON.stringify(harness.tools.parle_harden_account.parameters), /password|recovery|provisioning|path/i);
   assert.deepEqual(Object.keys(harness.tools.parle_mint_principal_invite.parameters.properties).sort(), ["confirmMutation", "principalHandle", "principalId", "reason", "roomId"]);
   assert.deepEqual(Object.keys(harness.tools.parle_claim_principal_invite.parameters.properties).sort(), ["action", "confirmMutation", "deleteHandoffOnSuccess", "handoffPath", "reason"]);
   assert.deepEqual(Object.keys(harness.tools.parle_accept_room_invitation.parameters.properties).sort(), ["action", "confirmMutation", "invitation", "reason"]);
@@ -584,7 +586,7 @@ test("generic parle_request honestly excludes human-session auth", async () => {
 
   const status = await harness.call("parle_status");
   assert.equal(status.details.humanSession.genericRequest, "unsupported");
-  assert.deepEqual(status.details.humanSession.supportedTools, ["parle_login", "parle_create_room", "parle_add_own_agent_seat", "parle_mint_principal_invite", "parle_claim_principal_invite", "parle_accept_room_invitation", "parle_connect_own_agent"]);
+  assert.deepEqual(status.details.humanSession.supportedTools, ["parle_login", "parle_create_room", "parle_add_own_agent_seat", "parle_harden_account", "parle_mint_principal_invite", "parle_claim_principal_invite", "parle_accept_room_invitation", "parle_connect_own_agent"]);
 });
 
 test("parle_login starts email login without requiring raw request plumbing", async () => {

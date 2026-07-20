@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.17 (2026-07-19)
+
+Bundled MCP refresh with secret-safe `parle_harden_account` and separate human-only helper guidance.
+
 ## 0.5.16 (2026-07-19)
 
 Bundled MCP refresh with structured human invitation-mint denial reasons and safe next actions.

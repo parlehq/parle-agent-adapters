@@ -46,3 +46,7 @@ This package owns:
 - adapter rendering of structured client state into MCP structured content plus text fallback
 - output caps and redacted MCP-safe errors
 - MCP smoke-test fixtures
+
+## Human account hardening
+
+`parle_harden_account` is the only MCP account-hardening surface. It accepts only `action`, `confirmMutation`, and `reason`, never starts a helper, and never accepts or returns secrets or local paths supplied by a model. The human must separately launch `parle-hardening-secret` on a controlling TTY. Follow the [operator ceremony](../../docs/account-hardening-ceremony.md), especially its recording and scrollback prerequisite.

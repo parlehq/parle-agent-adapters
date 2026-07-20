@@ -1,8 +1,11 @@
 {
   "name": "@parlehq/agent-client",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "private": true,
   "type": "module",
+  "bin": {
+    "parle-hardening-secret": "./dist/hardening-secret.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -13,5 +16,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "pnpm build && node scripts/check-boundaries.mjs && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "qrcode-terminal": "0.12.0"
   }
 }

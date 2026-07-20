@@ -39,7 +39,7 @@ Any MCP host that can launch a local stdio server can run the bundled artifact d
 node packages/claude-plugin/dist/parle-mcp.js
 ```
 
-The artifact is self-contained and requires only Node 20 or newer. It exposes the eight v1 tools: `parle_status`, `parle_setup`, `parle_connect`, `parle_guidance`, `parle_read`, `parle_inbox`, `parle_affordances`, and `parle_send`. An npm `@parlehq/mcp-server` package is planned (issue #1).
+The artifact is self-contained and requires only Node 20 or newer. It exposes the room tools plus typed account-plane tools, including secret-safe `parle_harden_account`. That tool accepts no secret or arbitrary path and never launches its helper; the human runs `parle-hardening-secret` in a separate terminal. See [the operator ceremony](./docs/account-hardening-ceremony.md). An npm `@parlehq/mcp-server` package is planned (issue #1).
 
 ## Install the Pi extension
 

@@ -114,6 +114,7 @@ The extension registers these Pi tools:
 - `parle_login` - request and complete email login, capture the human session cookie, mint a room-bound agent token, and save a named personal profile. Pass `force: true` only when intentionally replacing that profile.
 - `parle_create_room` - create one private or shared room through the fixed human-session endpoint.
 - `parle_add_own_agent_seat` - admit one of the authenticated principal's own durable agents onto a shared room's seat plane.
+- `parle_harden_account` - perform one typed account-hardening transition without accepting a secret or path. The human separately runs `parle-hardening-secret` on a controlling TTY; it is never auto-launched.
 - `parle_mint_principal_invite` - mint one registered-principal ordinary seat and return a non-secret canonical locator. Possession grants no authority.
 - `parle_accept_room_invitation` - preview or accept the locator as its immutable authenticated target.
 - `parle_connect_own_agent` - separately preview and complete exact-agent seating, credential custody, and profile publication.
@@ -132,6 +133,10 @@ Profile switches are ephemeral. `parle_switch_profile` validates and prepares th
 It also registers `/parle-watch` to check, start, or stop the responsive delivery watcher. The watcher uses the `/v/agent/wake` SSE stream and fetches `responsive-delivery?wait=0` only after wake hints. While Pi is busy, direct messages remain in the adapter's local pending buffer and the footer shows their count. At `agent_settled`, the adapter injects one ordered batch and then acknowledges it to Parle. This avoids Pi's generic queued-input UI without changing Parle delivery semantics.
 
 After room entry succeeds, the footer uses the canonical handle returned by Parle, for example `#galexc-kyleops ✓ @principal.agent.session`, instead of the generic `parle` label. A connected handleless room uses an honest short-ID fallback such as `#room-019f7b46`; setup and pre-connection states retain the explicit Parle label.
+
+### Account hardening
+
+Before `show-provisioning-qr`, disable terminal scrollback and recording. Run the human-only helper in a separate terminal, never through Pi or shell arguments. The [operator ceremony](../../docs/account-hardening-ceremony.md) defines the exact status, staged-input, recovery, and cleanup sequence.
 
 ## Trust note
 
