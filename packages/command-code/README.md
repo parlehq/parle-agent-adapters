@@ -38,7 +38,7 @@ The MCP server resolves `~/.parle/profiles` directly. If the catalog has a `[def
 
 The native mod uses `cmd.ui.setStatus` to render the same credential-free, cwd-scoped runtime state used by the Claude statusline. One live session shows `#room-handle ✓ @principal.agent.session`; several sessions show an honest count rather than claiming one sibling address as the current session; a configured but disconnected workspace shows `parle · off`. Fresh unread state is included when available.
 
-The mod reads only `<cwd>/.parle/runtime/*.json` snapshots published by the MCP server. It refreshes on Command Code lifecycle events and a lightweight timer, renders nothing in headless mode, and never reads profile credentials.
+The mod reads only `<cwd>/.parle/runtime/*.json` snapshots published by the MCP server. It refreshes on Command Code lifecycle events and a lightweight timer, renders nothing in headless mode, and never reads profile credentials. If the host sandbox blocks sibling-process inspection with `EPERM`, the mod treats liveness as indeterminate and relies on the snapshot's bounded expiry instead of hiding a connected session.
 
 A normal prompt can then be concise:
 

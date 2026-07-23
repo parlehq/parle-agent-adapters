@@ -108,8 +108,10 @@ function isLive(snapshot: any, now: number): boolean {
   if (!Number.isFinite(expiresAt) || expiresAt <= now + EXPIRY_SKEW_MS) return false;
   try {
     process.kill(snapshot.pid, 0);
-  } catch {
-    return false;
+  } catch (error) {
+    // Sandboxed hosts can deny signal checks for a live sibling process.
+    // EPERM proves the pid exists; expiry still bounds stale snapshots.
+    if ((error as { code?: string })?.code !== "EPERM") return false;
   }
 
   const claimedStart = Date.parse(snapshot.processStartedAt || "");

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.12
+
+- Keep unexpired runtime snapshots visible when Command Code's sandbox returns `EPERM` for a sibling-process liveness check.
+- Continue rejecting missing pids and rely on snapshot expiry when process inspection is permission-blocked.
+
 ## 0.1.11
 
 - Add a native Command Code v1 mod that renders credential-free Parle state through `cmd.ui.setStatus`.

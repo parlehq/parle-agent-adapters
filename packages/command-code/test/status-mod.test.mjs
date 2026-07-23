@@ -53,6 +53,23 @@ test("renders honest multi-session state and ignores dead snapshots", () => {
   }
 });
 
+test("treats sandbox EPERM pid checks as live and relies on snapshot expiry", () => {
+  const cwd = workspace("sandboxed");
+  const originalKill = process.kill;
+  try {
+    writeSnapshot(cwd, "one", snapshot());
+    process.kill = () => {
+      const error = new Error("operation not permitted");
+      error.code = "EPERM";
+      throw error;
+    };
+    assert.equal(renderParleStatus(cwd), "#workshop ✓ @gilman.galexc.abcdefgh");
+  } finally {
+    process.kill = originalKill;
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("renders disconnected only for a configured workspace", () => {
   const cwd = workspace("configured");
   try {
