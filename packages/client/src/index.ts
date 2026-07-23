@@ -55,6 +55,17 @@ export type ParleConfig = {
 
 export type BootstrapState = "unstarted" | "starting" | "ready" | "failed";
 
+export type TerminalCause = {
+  status?: number;
+  code?: string;
+  action?: ErrorAction;
+  scope?: ErrorScope;
+  retryable: false;
+  message: string;
+  occurredAt: string;
+  streak: number;
+};
+
 export type RuntimeState = {
   bootstrapped: boolean;
   bootstrapState: BootstrapState;
@@ -70,6 +81,9 @@ export type RuntimeState = {
   lastHttpStatus?: number;
   lastError?: string;
   lastBootstrapError?: string;
+  // The terminal cause is durable operational state. lastError-like fields may
+  // be replaced by later transient failures without reopening this latch.
+  terminalCause?: TerminalCause;
   nextRetryAt?: string;
   unreadCount?: number;
   unreadAsOf?: string;
@@ -652,6 +666,9 @@ export class ParleAgentClient {
   private consecutiveBootstrapFailures = 0;
   private unreadInFlight = false;
   private unreadPollTimer: ReturnType<typeof setTimeout> | null = null;
+  // This latch is deliberately consulted only by automatic work. Explicit
+  // connect/read/send and raw requestJson calls remain recovery paths.
+  private automaticTerminalBinding?: string;
 
   constructor(options: ClientOptions = {}) {
     this.env = options.env || process.env;
@@ -728,14 +745,43 @@ export class ParleAgentClient {
     return profile ? { ...this.env, PARLE_PROFILE: profile } : this.env;
   }
 
-  private refreshConfigIfAgentTokenChanged(): boolean {
-    const oldToken = this.cfg.agentToken?.value;
-    const next = resolveConfig(this.cwd, this.selectedEnvironment());
-    const newToken = next.agentToken?.value;
-    if (!oldToken || !newToken || oldToken === newToken) return false;
-    this.cfg = next;
-    this.runtime.lastBootstrapError = undefined;
+  private bindingKey(cfg = this.cfg): string {
+    return [cfg.roomId?.value || "", cfg.agentToken?.value || "", cfg.apiBase.value || "", cfg.wakeBase.value || "", cfg.profile?.value || ""].join("\u0000");
+  }
+
+  private clearAutomaticTerminalLatch(): void {
+    this.automaticTerminalBinding = undefined;
+    this.runtime.terminalCause = undefined;
     this.runtime.nextRetryAt = undefined;
+  }
+
+  private recordTerminalCause(error: unknown): void {
+    const api = error instanceof ParleApiError ? error : undefined;
+    if (!api || !["fix_client", "reauthorize", "stop"].includes(api.action || "")) return;
+    const sameBinding = this.automaticTerminalBinding === this.bindingKey();
+    this.automaticTerminalBinding = this.bindingKey();
+    this.runtime.terminalCause = {
+      status: api.status,
+      code: api.code,
+      action: api.action,
+      scope: api.scope,
+      retryable: false,
+      message: redactString(api.message),
+      occurredAt: this.now().toISOString(),
+      streak: sameBinding ? (this.runtime.terminalCause?.streak || 0) + 1 : 1,
+    };
+  }
+
+  // Disk-backed credentials are the one safe automatic recovery input. A
+  // changed binding clears only the automatic gate, never suppressing an
+  // explicit caller's retry.
+  private refreshConfigIfAgentTokenChanged(): boolean {
+    const oldBinding = this.bindingKey();
+    const next = resolveConfig(this.cwd, this.selectedEnvironment());
+    if (oldBinding === this.bindingKey(next)) return false;
+    this.cfg = next;
+    if (oldBinding !== this.bindingKey()) this.clearAutomaticTerminalLatch();
+    this.runtime.lastBootstrapError = undefined;
     this.publishRuntimeState();
     return true;
   }
@@ -862,7 +908,7 @@ export class ParleAgentClient {
       this.bootstrapGeneration += 1;
       this.runtime.bootstrapState = "ready";
       this.runtime.lastBootstrapError = undefined;
-      this.runtime.nextRetryAt = undefined;
+      this.clearAutomaticTerminalLatch();
       this.consecutiveBootstrapFailures = 0;
       this.publishRuntimeState();
       this.scheduleUnreadPoll();
@@ -872,10 +918,14 @@ export class ParleAgentClient {
         return this.doBootstrap(signal, preserveCursor, false);
       }
       this.consecutiveBootstrapFailures += 1;
-      const backoffMs = Math.min(60_000, 5_000 * 2 ** (this.consecutiveBootstrapFailures - 1));
+      const api = error instanceof ParleApiError ? error : undefined;
+      const backoffMs = api?.retryable ? (api.retryAfterMs ?? Math.min(60_000, 5_000 * 2 ** (this.consecutiveBootstrapFailures - 1))) : undefined;
       this.runtime.bootstrapState = "failed";
       this.runtime.lastBootstrapError = redactString(error instanceof Error ? error.message : String(error));
-      this.runtime.nextRetryAt = new Date(this.now().getTime() + backoffMs).toISOString();
+      // nextRetryAt is an exact retryable-failure gate, never a fabricated
+      // delay for terminal auth/config faults.
+      this.runtime.nextRetryAt = backoffMs === undefined ? undefined : new Date(this.now().getTime() + backoffMs).toISOString();
+      this.recordTerminalCause(error);
       this.publishRuntimeState();
       throw error;
     }
@@ -957,6 +1007,7 @@ export class ParleAgentClient {
           this.bootstrapGeneration += 1;
           this.rebootstrapEpisode = null;
           this.consecutiveBootstrapFailures = 0;
+          this.clearAutomaticTerminalLatch();
           this.publishRuntimeState();
           this.scheduleUnreadPoll();
         },
@@ -1014,8 +1065,12 @@ export class ParleAgentClient {
   // or inside the failure backoff window (explicit tool calls like connect/read/
   // send are user-paced and always retry; this path is the one that could hammer).
   async ensureReadySafe(signal?: AbortSignal): Promise<boolean> {
+    // Preflight disk rotation before consulting the latch. A changed credential
+    // binding is an affirmative recovery signal and may reopen automatic work.
+    this.refreshConfigIfAgentTokenChanged();
     if (this.runtime.bootstrapped && this.runtime.sessionHandle && !this.sessionExpired()) return false;
     if (!this.cfg.roomId?.value || !this.cfg.agentToken?.value) return false;
+    if (this.automaticTerminalBinding === this.bindingKey()) return false;
     if (this.runtime.bootstrapState === "failed" && this.runtime.nextRetryAt && new Date(this.runtime.nextRetryAt) > this.now()) return false;
     try {
       await this.bootstrap(signal);
@@ -1198,7 +1253,10 @@ export class ParleAgentClient {
     try {
       return await fn();
     } catch (error: any) {
-      if (!(error instanceof ParleApiError) || error.action !== "rebootstrap") throw error;
+      if (!(error instanceof ParleApiError) || error.action !== "rebootstrap") {
+        this.recordTerminalCause(error);
+        throw error;
+      }
       // Missing handles share one defensive bucket. In practice session terminal
       // errors arrive only after a handle was presented.
       const failedSessionHandle = this.runtime.sessionHandle || "<missing-session>";
@@ -1221,6 +1279,8 @@ export class ParleAgentClient {
       } catch (bootstrapError: any) {
         if (bootstrapError instanceof ParleApiError && ["fix_client", "reauthorize", "stop"].includes(bootstrapError.action || "")) {
           this.rebootstrapEpisode = { failedSessionHandle, attempted: true, terminal: true };
+          // doBootstrap recorded the durable terminal cause before this
+          // episode wrapper observed it; do not count one fault twice.
           this.runtime.lastBootstrapError = terminalStatusFor(bootstrapError);
           this.publishRuntimeState();
         }
@@ -1231,6 +1291,17 @@ export class ParleAgentClient {
   }
 
   async openWakeStream(signal?: AbortSignal): Promise<Response> {
+    // Wake streams are watcher machinery, never an explicit user-paced tool
+    // call. Keep them behind the same binding-scoped automatic latch.
+    if (this.automaticTerminalBinding === this.bindingKey()) {
+      const cause = this.runtime.terminalCause;
+      throw new ParleApiError(cause?.message || "Parle automatic wake is stopped until credentials or binding change", {
+        status: cause?.status,
+        code: cause?.code,
+        action: cause?.action,
+        scope: cause?.scope,
+      });
+    }
     return this.withRebootstrap(async () => {
       this.assertConfigured();
       const url = wakeUrl(this.cfg);

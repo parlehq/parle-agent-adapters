@@ -1136,3 +1136,83 @@ test("version error hint preserves supported-version precedence", () => {
   const cfg = { version: { value: "old", source: "env" } };
   assert.equal(formatVersionErrorHint(cfg, { supported: ["new"], current: "also-new" }), " Sent Parle-Version old from env; adapter default is 2026-07-07. Server supports new. Unset the stale PARLE_VERSION override or upgrade the adapter.");
 });
+
+test("automatic bootstrap terminal latch fails closed while explicit connect remains a recovery path", async () => {
+  let requests = 0;
+  const client = new ParleAgentClient({
+    env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "revoked-token" },
+    fetch: async () => {
+      requests += 1;
+      return json({ error: { code: "invalid_agent_token", message: "revoked", action: "reauthorize", retryable: false, scope: "agent_token" } }, 401);
+    },
+  });
+  assert.equal(await client.ensureReadySafe(), true);
+  assert.equal(await client.ensureReadySafe(), false);
+  assert.equal(requests, 1);
+  assert.equal(client.runtime.terminalCause?.action, "reauthorize");
+  assert.equal(client.runtime.nextRetryAt, undefined);
+  await assert.rejects(() => client.connect(), { status: 401 });
+  assert.equal(requests, 2, "explicit connect must bypass the automatic latch");
+  assert.equal(client.runtime.terminalCause?.streak, 2, "the next admitted terminal fault advances the terminal streak");
+});
+
+test("terminal wake failures use the same shared-client automatic latch", async () => {
+  let wakeCalls = 0;
+  const client = new ParleAgentClient({
+    env: { PARLE_ROOM_ID: "room-1", PARLE_ROOM_AGENT_TOKEN: "revoked-token" },
+    fetch: async (url) => {
+      if (String(url).endsWith("/v/agent/wake")) {
+        wakeCalls += 1;
+        return json({ error: { code: "invalid_agent_token", message: "revoked", action: "reauthorize", retryable: false, scope: "agent_token" } }, 401);
+      }
+      throw new Error("bootstrap should not run");
+    },
+  });
+  Object.assign(client.runtime, { bootstrapped: true, bootstrapState: "ready", sessionHandle: "parle_ses_live", agentSessionId: "as-live", roomId: "room-1", expiresAt: "2999-01-01T00:00:00Z" });
+  await assert.rejects(() => client.openWakeStream(), { status: 401 });
+  assert.equal(wakeCalls, 1);
+  assert.equal(client.runtime.terminalCause?.action, "reauthorize");
+  assert.equal(client.runtime.terminalCause?.retryable, false);
+  assert.equal(await client.ensureReadySafe(), false, "mid-session terminal cause keeps automatic readiness quiet");
+  await assert.rejects(() => client.openWakeStream(), { status: 401 });
+  assert.equal(wakeCalls, 1, "the automatic wake latch rejects without another request");
+});
+
+test("disk credential rotation clears the automatic client latch and a retry gate stays exact", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "parle-client-auto-latch-"));
+  try {
+    writeFileSync(join(cwd, ".env"), "PARLE_ROOM_AGENT_TOKEN=old-token\n");
+    let nowMs = Date.parse("2026-01-01T00:00:00Z");
+    let sessions = 0;
+    const client = new ParleAgentClient({
+      cwd,
+      env: { PARLE_ROOM_ID: "room-1" },
+      now: () => new Date(nowMs),
+      fetch: async (url, init = {}) => {
+        const path = String(url);
+        if (path.endsWith("/v/agent/sessions")) {
+          sessions += 1;
+          if (sessions === 1) return json({ error: { code: "rate_limited", message: "wait", action: "backoff", retryable: true, scope: "rate_limit", retry_after_ms: 2500 } }, 429);
+          if (init.headers.Authorization === "Bearer old-token") return json({ error: { code: "invalid_agent_token", message: "revoked", action: "reauthorize", retryable: false, scope: "agent_token" } }, 401);
+          return json({ agent_session_id: "as-1", session_credential: "parle_ses_new", expires_at: "later" }, 201);
+        }
+        if (path.endsWith("/participants")) return json({ participant_id: "p-1" }, 201);
+        if (path.includes("/projection")) return json({ watermark: 0, messages: [] });
+        throw new Error(`unexpected ${path}`);
+      },
+    });
+    await client.ensureReadySafe();
+    assert.equal(client.runtime.nextRetryAt, "2026-01-01T00:00:02.500Z");
+    await client.ensureReadySafe();
+    assert.equal(sessions, 1, "a closed 429 gate must not extend itself");
+    nowMs += 2500;
+    await client.ensureReadySafe();
+    assert.equal(client.runtime.terminalCause?.streak, 1, "the next admitted terminal fault starts the terminal streak");
+    writeFileSync(join(cwd, ".env"), "PARLE_ROOM_AGENT_TOKEN=new-token\n");
+    await client.ensureReadySafe();
+    assert.equal(client.runtime.bootstrapped, true);
+    assert.equal(client.runtime.terminalCause, undefined);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});

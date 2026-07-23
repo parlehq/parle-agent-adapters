@@ -2008,7 +2008,7 @@ function summarizeSendDelivery(details) {
 // src/index.ts
 import { Type } from "typebox";
 var EXTENSION_ID = "25-parle";
-var PI_EXTENSION_VERSION = "0.1.29";
+var PI_EXTENSION_VERSION = "0.1.30";
 var RUNTIME_SCHEMA_VERSION2 = 1;
 var AI_GUIDANCE_URL = "https://ai.parle.sh";
 var API_LLMS_URL = "https://api.parle.sh/llms.txt";
@@ -2034,6 +2034,7 @@ var lastCtx;
 var watcherAbort;
 var watcherLoopRunning = false;
 var activeWatcherRunId = 0;
+var automaticFailureBinding;
 var injectedKeys = /* @__PURE__ */ new Set();
 var injectedKeyOrder = [];
 var seenKeys = /* @__PURE__ */ new Set();
@@ -2049,6 +2050,29 @@ function sameRoomBinding(left, right) {
 }
 function configForLiveRuntime(resolved) {
   return runtime.bootstrapped && liveConfig ? liveConfig : resolved;
+}
+function bindingKey(cfg) {
+  return [cfg.roomId?.value || "", cfg.agentToken?.value || "", cfg.apiBase.value || "", cfg.wakeBase.value || "", cfg.profile?.value || ""].join("\0");
+}
+function clearAutomaticFailureLatch() {
+  automaticFailureBinding = void 0;
+  runtime.terminalCause = void 0;
+  runtime.nextRetryAt = void 0;
+}
+function preflightAutomaticBinding(cfg) {
+  if (automaticFailureBinding && automaticFailureBinding !== bindingKey(cfg)) clearAutomaticFailureLatch();
+}
+function terminalError(error) {
+  return ["reauthorize", "stop", "fix_client"].includes(error?.action);
+}
+function retryableError(error) {
+  return error?.retryable === true || ["backoff", "retry", "retry_with_backoff"].includes(error?.action);
+}
+function automaticGateClosed(cfg) {
+  preflightAutomaticBinding(cfg);
+  if (automaticFailureBinding !== bindingKey(cfg)) return false;
+  if (runtime.terminalCause) return true;
+  return Boolean(runtime.nextRetryAt && Date.parse(runtime.nextRetryAt) > Date.now());
 }
 function readKeyValueFile(path) {
   if (!existsSync4(path)) return {};
@@ -2847,9 +2871,21 @@ async function fetchWakeStream(cfg, signal) {
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     const json = parseJsonMaybe(text);
-    const msg = redactString(json?.error?.message || truncateText(redactString(text), 4096).text || response.statusText);
+    const errorObj = json?.error && typeof json.error === "object" ? json.error : {};
+    const code = typeof errorObj.code === "string" ? errorObj.code : void 0;
+    const registry = code ? ERROR_REGISTRY[code] : void 0;
+    const action = typeof errorObj.action === "string" && ERROR_ACTIONS.includes(errorObj.action) ? errorObj.action : registry?.action;
+    const retryAfterHeader = response.headers.get("retry-after");
+    const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : Number.NaN;
+    const retryAfterMs = typeof errorObj.retry_after_ms === "number" && Number.isFinite(errorObj.retry_after_ms) ? Math.max(0, Math.trunc(errorObj.retry_after_ms)) : Number.isFinite(retryAfterSeconds) ? Math.max(0, Math.trunc(retryAfterSeconds * 1e3)) : void 0;
+    const msg = redactString(errorObj.message || truncateText(redactString(text), 4096).text || response.statusText);
     const err = new Error(`Parle wake stream ${response.status}: ${msg}`);
     err.status = response.status;
+    err.code = code;
+    err.action = action;
+    err.scope = typeof errorObj.scope === "string" ? errorObj.scope : registry?.scope;
+    err.retryable = typeof errorObj.retryable === "boolean" ? errorObj.retryable : registry?.retryable;
+    err.retryAfterMs = retryAfterMs;
     throw err;
   }
   return response;
@@ -2938,6 +2974,7 @@ async function bootstrap(ctx, cfg, signal, preserveCursor = false, aliasOverride
     state.cursor = typeof projection.watermark === "number" ? projection.watermark : 0;
   }
   state.lastError = void 0;
+  if (state === runtime) clearAutomaticFailureLatch();
   if (publish) {
     if (state === runtime) liveConfig = cfg;
     setStatus(ctx, cfg);
@@ -2995,6 +3032,7 @@ async function switchProfile(pi, ctx, profile, signal) {
       activeProfileOverride = profile;
       liveConfig = value.cfg;
       resetRoomScopedRuntime({ ...value.state, watcherState: "off", watcherStarted: false, watcherEnabled: parseBoolEnabled(value.cfg.watchEnabled.value) });
+      clearAutomaticFailureLatch();
       try {
         removeRuntimeFile2(cwd);
       } catch {
@@ -3280,6 +3318,10 @@ function recordWatcherSuccess() {
   runtime.lastSuccessAt = (/* @__PURE__ */ new Date()).toISOString();
   runtime.consecutiveWatcherFailures = 0;
   runtime.lastErrorClass = void 0;
+  if (!runtime.terminalCause) {
+    runtime.nextRetryAt = void 0;
+    automaticFailureBinding = void 0;
+  }
 }
 function recordWatcherError(error) {
   runtime.lastError = redactString(error instanceof Error ? error.message : String(error));
@@ -3287,6 +3329,30 @@ function recordWatcherError(error) {
   runtime.lastErrorClass = classifyWatcherError(error);
   runtime.consecutiveWatcherFailures = (runtime.consecutiveWatcherFailures || 0) + 1;
   runtime.watcherBackoffCount = (runtime.watcherBackoffCount || 0) + 1;
+}
+function recordAutomaticFailure(error, cfg, runId) {
+  if (runId !== void 0 && runId !== activeWatcherRunId) return false;
+  recordWatcherError(error);
+  const binding = bindingKey(cfg);
+  const priorSameBinding = automaticFailureBinding === binding;
+  automaticFailureBinding = binding;
+  if (terminalError(error)) {
+    runtime.nextRetryAt = void 0;
+    runtime.terminalCause = {
+      status: error?.status,
+      code: error?.code,
+      action: error?.action,
+      scope: error?.scope,
+      retryable: false,
+      message: redactString(error instanceof Error ? error.message : String(error)),
+      occurredAt: (/* @__PURE__ */ new Date()).toISOString(),
+      streak: priorSameBinding && runtime.terminalCause ? runtime.terminalCause.streak + 1 : 1
+    };
+  } else if (retryableError(error)) {
+    const delay = watcherRetryDelayMs(error);
+    runtime.nextRetryAt = new Date(Date.now() + delay).toISOString();
+  }
+  return true;
 }
 function terminalWatcherState(error) {
   if (error?.action === "reauthorize") return "auth_expired";
@@ -3380,7 +3446,7 @@ async function runWatcher(pi, ctx, cfg, signal, runId) {
   try {
     await ensureBootstrapped(ctx, cfg, signal);
     if (!runtime.baselineAt && !cfg.sessionAlias?.value) await baselineResponsiveDelivery(ctx, cfg, signal);
-    while (!signal.aborted && watcherConfigured(cfg)) {
+    while (!signal.aborted && watcherConfigured(cfg) && !automaticGateClosed(cfg)) {
       try {
         await maybeHeartbeatAgentSession(ctx, cfg, signal);
         runtime.watcherState = "waiting";
@@ -3389,8 +3455,8 @@ async function runWatcher(pi, ctx, cfg, signal, runId) {
         recordWatcherSuccess();
         if (!signal.aborted) await sleep(WATCH_EMPTY_BACKOFF_MS, signal);
       } catch (error) {
-        if (signal.aborted) break;
-        recordWatcherError(error);
+        if (signal.aborted || runId !== activeWatcherRunId) break;
+        if (!recordAutomaticFailure(error, cfg, runId)) break;
         const terminalState = terminalWatcherState(error);
         runtime.watcherState = terminalState || (error?.action === "rebootstrap" ? "session_expired" : "backoff");
         setStatus(ctx, cfg);
@@ -3399,8 +3465,8 @@ async function runWatcher(pi, ctx, cfg, signal, runId) {
       }
     }
   } catch (error) {
-    if (!signal.aborted) {
-      recordWatcherError(error);
+    if (!signal.aborted && runId === activeWatcherRunId) {
+      recordAutomaticFailure(error, cfg, runId);
       runtime.watcherState = terminalWatcherState(error) || (error?.action === "rebootstrap" ? "session_expired" : "backoff");
       setStatus(ctx, cfg);
     }
@@ -3418,7 +3484,7 @@ async function runWatcher(pi, ctx, cfg, signal, runId) {
 }
 function startWatcher(pi, ctx, cfg = resolveConfig(ctx.cwd || process.cwd())) {
   if (runtime.bootstrapped && runtime.roomId && runtime.roomId !== cfg.roomId?.value) return;
-  if (!watcherConfigured(cfg)) return;
+  if (!watcherConfigured(cfg) || automaticGateClosed(cfg)) return;
   if (watcherLoopRunning && watcherAbort && !watcherAbort.signal.aborted) return;
   watcherAbort?.abort();
   watcherAbort = new AbortController();
@@ -3476,6 +3542,8 @@ function statusDetails(ctx) {
       roomHandle: runtime.roomHandle,
       cursor: runtime.cursor,
       lastError: runtime.lastError,
+      terminalCause: runtime.terminalCause,
+      nextRetryAt: runtime.nextRetryAt,
       watcherState: runtime.watcherState,
       watcherStarted: runtime.watcherStarted,
       watcherEnabled: runtime.watcherEnabled,
@@ -3539,6 +3607,8 @@ var __testing = {
   maybeHeartbeatAgentSession,
   terminalWatcherState,
   watcherRetryDelayMs,
+  automaticGateClosed,
+  recordAutomaticFailure,
   startWatcher,
   handleWakeHint,
   queueResponsiveMessages,
@@ -3566,6 +3636,7 @@ var __testing = {
     watcherAbort = void 0;
     watcherLoopRunning = false;
     activeWatcherRunId = 0;
+    automaticFailureBinding = void 0;
   }
 };
 function setStatus(ctx, cfg = resolveConfig(ctx.cwd || process.cwd())) {
@@ -3587,6 +3658,7 @@ function parleExtension(pi) {
   pi.on("session_start", (_event, ctx) => {
     lastCtx = ctx;
     const cfg = resolveConfig(ctx.cwd || process.cwd());
+    preflightAutomaticBinding(cfg);
     pruneRuntimeFiles2(ctx.cwd || process.cwd());
     setStatus(ctx, cfg);
     startWatcher(pi, ctx, cfg);
@@ -3653,11 +3725,11 @@ function parleExtension(pi) {
     async execute(_id, _params, signal, _update, ctx) {
       lastCtx = ctx;
       const cfg = configForLiveRuntime(resolveConfig(ctx.cwd || process.cwd()));
-      if (cfg.enabled && cfg.roomId?.value && cfg.agentToken?.value && !runtime.bootstrapped) {
+      if (cfg.enabled && cfg.roomId?.value && cfg.agentToken?.value && !runtime.bootstrapped && !automaticGateClosed(cfg)) {
         try {
           await ensureBootstrapped(ctx, cfg, signal);
         } catch (error) {
-          runtime.lastError = error instanceof Error ? error.message : String(error);
+          recordAutomaticFailure(error, cfg);
           publishRuntimeState(ctx, cfg);
         }
       }

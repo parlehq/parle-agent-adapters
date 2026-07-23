@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.13
+
+- Stop automatic reconnect activity after terminal Parle authentication or client failures while preserving explicit user-paced recovery attempts.
+- Keep the terminal cause separate from transient retry state in the bundled shared client.
+
 ## 0.1.12
 
 - Keep unexpired runtime snapshots visible when Command Code's sandbox returns `EPERM` for a sibling-process liveness check.

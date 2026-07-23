@@ -206,6 +206,8 @@ test("watcher honors 429 Retry-After before a terminal 401 stops it", async () =
   assert.equal(probe.heartbeatAt.length, 2);
   assert.ok(probe.heartbeatAt[1] - probe.heartbeatAt[0] >= 25);
   assert.equal(__testing.runtimeState().watcherState, "auth_expired");
+  assert.equal(__testing.runtimeState().nextRetryAt, undefined, "the admitted terminal fault replaces the retry gate");
+  assert.equal(__testing.runtimeState().terminalCause.action, "reauthorize");
 });
 
 test("watcher stops on a terminal stop action", async () => {
@@ -260,7 +262,7 @@ test("status publishes a display-safe runtime snapshot", async () => {
   assert.equal(snapshot.sessionAddress, "@p.a.raw-session");
   assert.equal(snapshot.roomId, "room-1");
   assert.equal(snapshot.roomHandle, "galexc-intercom");
-  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.29" });
+  assert.deepEqual(snapshot.adapter, { name: "@parlehq/pi-extension", version: "0.1.30" });
   assert.equal(JSON.stringify(snapshot).includes("parle_ses_raw-session"), false);
 });
 
@@ -1272,7 +1274,7 @@ test("heartbeat rebootstrap action replaces the session before the watcher can w
     if (u.includes("/heartbeat")) {
       heartbeatCalls += 1;
       assert.equal(init.headers["Parle-Client-Name"], "@parlehq/pi-extension");
-      assert.equal(init.headers["Parle-Client-Version"], "0.1.29");
+      assert.equal(init.headers["Parle-Client-Version"], "0.1.30");
       if (heartbeatCalls === 1) return new Response(JSON.stringify({ error: { code: "agent_session_ended", message: "ended", action: "rebootstrap", retryable: false, scope: "agent_session", retry_after_ms: null } }), { status: 401 });
       return new Response(null, { status: 204 });
     }
@@ -1416,4 +1418,83 @@ test("Pi delegates delivery summary wording and precedence to agent client", asy
   });
   assert.deepEqual(summarizeSendDelivery({ moderation: { delivered: true } }), { state: "delivered", message: "Message accepted and delivered." });
   assert.equal(summarizeSendDelivery({}), undefined);
+});
+
+test("wake-stream terminal errors preserve the envelope and close automatic Pi activity", async () => {
+  const cwd = tempProject("PARLE_ROOM_ID=room-1\nPARLE_ROOM_AGENT_TOKEN=revoked\n");
+  let wakeCalls = 0;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v/agent/sessions")) return new Response(JSON.stringify({ agent_session_id: "as-wake", session_credential: "parle_ses_wake", expires_at: "later" }), { status: 201 });
+    if (u.endsWith("/participants")) return new Response(JSON.stringify({ participant_id: "p-wake" }), { status: 201 });
+    if (u.includes("/projection") || u.includes("/responsive-delivery")) return new Response(JSON.stringify({ watermark: 0, messages: [] }), { status: 200 });
+    if (u.includes("/heartbeat")) return new Response(null, { status: 204 });
+    if (u.endsWith("/v/agent/wake")) {
+      wakeCalls += 1;
+      return new Response(JSON.stringify({ error: { code: "invalid_agent_token", message: "revoked", action: "reauthorize", retryable: false, scope: "agent_token" } }), { status: 401 });
+    }
+    throw new Error(`unexpected ${u}`);
+  };
+  const harness = installHarness(cwd);
+  await harness.call("parle_status");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(wakeCalls, 1);
+  assert.equal(__testing.runtimeState().watcherState, "auth_expired");
+  assert.equal(__testing.runtimeState().terminalCause.code, "invalid_agent_token");
+  assert.equal(__testing.runtimeState().terminalCause.retryable, false);
+  await harness.call("parle_status");
+  assert.equal(wakeCalls, 1, "status cannot reopen the automatic wake path");
+});
+
+test("parle_status closes a fresh terminal bootstrap binding without further network calls", async () => {
+  const cwd = tempProject("PARLE_ROOM_ID=room-1\nPARLE_ROOM_AGENT_TOKEN=revoked\nPARLE_WATCH_ENABLED=0\n");
+  let sessions = 0;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/v/agent/sessions")) sessions += 1;
+    return new Response(JSON.stringify({ error: { code: "invalid_agent_token", message: "revoked", action: "reauthorize", retryable: false, scope: "agent_token" } }), { status: 401 });
+  };
+  const harness = installHarness(cwd);
+  const first = await harness.call("parle_status");
+  const second = await harness.call("parle_status");
+  assert.equal(sessions, 1);
+  assert.equal(first.details.runtime.terminalCause.action, "reauthorize");
+  assert.equal(second.details.runtime.terminalCause.streak, 1);
+  assert.equal(second.details.runtime.nextRetryAt, undefined);
+});
+
+test("explicit Pi reads retry a terminal binding and a changed disk binding reopens status", async () => {
+  const cwd = tempProject("PARLE_ROOM_ID=room-1\nPARLE_ROOM_AGENT_TOKEN=old\nPARLE_WATCH_ENABLED=0\n");
+  let sessions = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.endsWith("/v/agent/sessions")) {
+      sessions += 1;
+      if (init.headers.Authorization === "Bearer old") return new Response(JSON.stringify({ error: { code: "invalid_agent_token", message: "revoked", action: "reauthorize", retryable: false, scope: "agent_token" } }), { status: 401 });
+      return new Response(JSON.stringify({ agent_session_id: "as-new", session_credential: "parle_ses_new", expires_at: "later" }), { status: 201 });
+    }
+    if (u.endsWith("/participants")) return new Response(JSON.stringify({ participant_id: "p-new" }), { status: 201 });
+    if (u.includes("/projection")) return new Response(JSON.stringify({ watermark: 0, messages: [] }), { status: 200 });
+    throw new Error(`unexpected ${u}`);
+  };
+  const harness = installHarness(cwd);
+  await harness.call("parle_status");
+  await assert.rejects(harness.call("parle_inbox"), /revoked/);
+  assert.equal(sessions, 2, "explicit read must retain a user recovery attempt");
+  writeFileSync(join(cwd, ".env"), "PARLE_ROOM_ID=room-1\nPARLE_ROOM_AGENT_TOKEN=new\nPARLE_WATCH_ENABLED=0\n");
+  const status = await harness.call("parle_status");
+  assert.equal(sessions, 3);
+  assert.equal(status.details.runtime.bootstrapped, true);
+  assert.equal(status.details.runtime.terminalCause, undefined);
+});
+
+test("bootstrapped terminal heartbeat latches status and stale runs cannot replace its cause", async () => {
+  const probe = installWatcherFailureHarness(() => new Response(JSON.stringify({ error: { code: "invalid_agent_token", message: "revoked", action: "reauthorize", retryable: false, scope: "agent_token" } }), { status: 401 }));
+  await probe.harness.call("parle_status");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const callsBefore = probe.heartbeatAt.length;
+  await probe.harness.call("parle_status");
+  assert.equal(probe.heartbeatAt.length, callsBefore);
+  const cause = __testing.runtimeState().terminalCause;
+  __testing.recordAutomaticFailure({ status: 400, action: "fix_client", message: "stale" }, __testing.resolveConfig(probe.harness.cwd), -1);
+  assert.equal(__testing.runtimeState().terminalCause.message, cause.message);
 });

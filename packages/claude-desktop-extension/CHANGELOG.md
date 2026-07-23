@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.21 (2026-07-23)
+
+Bundled client refresh that stops automatic reconnect activity after terminal Parle authentication or client failures while preserving explicit user-paced recovery attempts.
+
 ## 0.5.20 (2026-07-21)
 
 Bundled MCP refresh with an opt-in Command Code SSE bridge. Claude Desktop behavior is unchanged because the bridge requires the Command Code host flag.

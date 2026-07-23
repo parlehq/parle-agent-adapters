@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.5.29 (2026-07-23)
+
+Stop automatic reconnect activity after terminal Parle authentication or client failures while preserving explicit user-paced recovery attempts. Status now retains the terminal cause separately from transient retry state.
+
 ## 0.5.28 (2026-07-21)
 
 Refresh the shared MCP artifact with an opt-in Command Code SSE bridge. Claude behavior is unchanged because the bridge requires the Command Code host flag.
