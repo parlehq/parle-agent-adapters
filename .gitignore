@@ -13,4 +13,5 @@ packages/claude-desktop-extension/out/
 coverage/
 .env
 .parle/credentials
+.parle/runtime/
 .DS_Store
